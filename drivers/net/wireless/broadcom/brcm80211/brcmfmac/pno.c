@@ -8,6 +8,7 @@
 
 #include "core.h"
 #include "debug.h"
+#include "feature.h"
 #include "fwil.h"
 #include "fwil_types.h"
 #include "cfg80211.h"
@@ -38,17 +39,19 @@ struct brcmf_pno_info {
 #define ifp_to_pno(_ifp)	((_ifp)->drvr->config->pno)
 
 static int brcmf_pno_store_request(struct brcmf_pno_info *pi,
-				   struct cfg80211_sched_scan_request *req)
+				   struct cfg80211_sched_scan_request *req,
+				   int max_reqs)
 {
-	if (WARN(pi->n_reqs == BRCMF_PNO_MAX_BUCKETS,
-		 "pno request storage full\n"))
-		return -ENOSPC;
+	int err = 0;
 
 	brcmf_dbg(SCAN, "reqid=%llu\n", req->reqid);
 	mutex_lock(&pi->req_lock);
-	pi->reqs[pi->n_reqs++] = req;
+	if (pi->n_reqs >= max_reqs)
+		err = -ENOSPC;
+	else
+		pi->reqs[pi->n_reqs++] = req;
 	mutex_unlock(&pi->req_lock);
-	return 0;
+	return err;
 }
 
 static int brcmf_pno_remove_request(struct brcmf_pno_info *pi, u64 reqid)
@@ -158,7 +161,7 @@ static int brcmf_pno_set_random(struct brcmf_if *ifp, struct brcmf_pno_info *pi)
 	struct brcmf_pno_macaddr_le pfn_mac;
 	u8 *mac_addr = NULL;
 	u8 *mac_mask = NULL;
-	int err, i;
+	int err, i, j;
 
 	for (i = 0; i < pi->n_reqs; i++)
 		if (pi->reqs[i]->flags & NL80211_SCAN_FLAG_RANDOM_ADDR) {
@@ -175,9 +178,9 @@ static int brcmf_pno_set_random(struct brcmf_if *ifp, struct brcmf_pno_info *pi)
 	pfn_mac.flags = BRCMF_PFN_MAC_OUI_ONLY | BRCMF_PFN_SET_MAC_UNASSOC;
 
 	memcpy(pfn_mac.mac, mac_addr, ETH_ALEN);
-	for (i = 0; i < ETH_ALEN; i++) {
-		pfn_mac.mac[i] &= mac_mask[i];
-		pfn_mac.mac[i] |= get_random_int() & ~(mac_mask[i]);
+	for (j = 0; j < ETH_ALEN; j++) {
+		pfn_mac.mac[j] &= mac_mask[j];
+		pfn_mac.mac[j] |= get_random_int() & ~(mac_mask[j]);
 	}
 	/* Clear multi bit */
 	pfn_mac.mac[0] &= 0xFE;
@@ -392,24 +395,33 @@ static int brcmf_pno_config_sched_scans(struct brcmf_if *ifp)
 {
 	struct brcmf_pub *drvr = ifp->drvr;
 	struct brcmf_pno_info *pi;
-	struct brcmf_gscan_config *gscan_cfg;
+	struct brcmf_gscan_config *gscan_cfg = NULL;
 	struct brcmf_gscan_bucket_config *buckets;
 	struct brcmf_pno_config_le pno_cfg;
-	size_t gsz;
+	bool gscan = brcmf_feat_is_enabled(ifp, BRCMF_FEAT_GSCAN);
+	size_t gsz = 0;
 	u32 scan_freq;
 	int err, n_buckets;
 
 	pi = ifp_to_pno(ifp);
+	if (!gscan && pi->n_reqs != 1) {
+		bphy_err(drvr, "legacy pno requires one request (n_reqs=%d)\n",
+			 pi->n_reqs);
+		return -EINVAL;
+	}
+
 	n_buckets = brcmf_pno_prep_fwconfig(pi, &pno_cfg, &buckets,
 					    &scan_freq);
 	if (n_buckets < 0)
 		return n_buckets;
 
-	gsz = sizeof(*gscan_cfg) + (n_buckets - 1) * sizeof(*buckets);
-	gscan_cfg = kzalloc(gsz, GFP_KERNEL);
-	if (!gscan_cfg) {
-		err = -ENOMEM;
-		goto free_buckets;
+	if (gscan) {
+		gsz = sizeof(*gscan_cfg) + (n_buckets - 1) * sizeof(*buckets);
+		gscan_cfg = kzalloc(gsz, GFP_KERNEL);
+		if (!gscan_cfg) {
+			err = -ENOMEM;
+			goto free_buckets;
+		}
 	}
 
 	/* clean up everything */
@@ -428,19 +440,21 @@ static int brcmf_pno_config_sched_scans(struct brcmf_if *ifp)
 	if (err < 0)
 		goto clean;
 
-	gscan_cfg->version = cpu_to_le16(BRCMF_GSCAN_CFG_VERSION);
-	gscan_cfg->retry_threshold = GSCAN_RETRY_THRESHOLD;
-	gscan_cfg->buffer_threshold = GSCAN_BATCH_NO_THR_SET;
-	gscan_cfg->flags = BRCMF_GSCAN_CFG_ALL_BUCKETS_IN_1ST_SCAN;
+	if (gscan) {
+		gscan_cfg->version = cpu_to_le16(BRCMF_GSCAN_CFG_VERSION);
+		gscan_cfg->retry_threshold = GSCAN_RETRY_THRESHOLD;
+		gscan_cfg->buffer_threshold = GSCAN_BATCH_NO_THR_SET;
+		gscan_cfg->flags = BRCMF_GSCAN_CFG_ALL_BUCKETS_IN_1ST_SCAN;
 
-	gscan_cfg->count_of_channel_buckets = n_buckets;
-	memcpy(&gscan_cfg->bucket[0], buckets,
-	       n_buckets * sizeof(*buckets));
+		gscan_cfg->count_of_channel_buckets = n_buckets;
+		memcpy(&gscan_cfg->bucket[0], buckets,
+		       n_buckets * sizeof(*buckets));
 
-	err = brcmf_fil_iovar_data_set(ifp, "pfn_gscan_cfg", gscan_cfg, gsz);
-
-	if (err < 0)
-		goto clean;
+		err = brcmf_fil_iovar_data_set(ifp, "pfn_gscan_cfg",
+					       gscan_cfg, gsz);
+		if (err < 0)
+			goto clean;
+	}
 
 	/* configure random mac */
 	err = brcmf_pno_set_random(ifp, pi);
@@ -468,12 +482,14 @@ int brcmf_pno_start_sched_scan(struct brcmf_if *ifp,
 			       struct cfg80211_sched_scan_request *req)
 {
 	struct brcmf_pno_info *pi;
-	int ret;
+	int ret, max_reqs;
 
 	brcmf_dbg(TRACE, "reqid=%llu\n", req->reqid);
 
 	pi = ifp_to_pno(ifp);
-	ret = brcmf_pno_store_request(pi, req);
+	max_reqs = brcmf_feat_is_enabled(ifp, BRCMF_FEAT_GSCAN) ?
+		   BRCMF_PNO_MAX_BUCKETS : 1;
+	ret = brcmf_pno_store_request(pi, req, max_reqs);
 	if (ret < 0)
 		return ret;
 
