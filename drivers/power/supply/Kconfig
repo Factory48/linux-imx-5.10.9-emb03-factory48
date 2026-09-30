@@ -9,6 +9,12 @@ menuconfig POWER_SUPPLY
 
 if POWER_SUPPLY
 
+config EMB03_POWER
+	bool "EMB03 reconstructed CW201x/SY6915 power support"
+	depends on I2C=y && GPIOLIB && OF && PM
+	help
+	  Board-specific minimal bring-up implementation. Built-in only.
+
 config POWER_SUPPLY_DEBUG
 	bool "Power supply debug"
 	help
