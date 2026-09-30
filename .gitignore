@@ -157,3 +157,20 @@ x509.genkey
 
 # Documentation toolchain
 sphinx_*/
+# Firmware exceptions (tracked for in-tree extra firmware builds)
+!/imx/sdma/*.bin
+
+# GitHub Actions workflows & dotfiles
+!.github/
+!.github/**
+
+# Build artifacts & temp exclusions
+*.cmd
+*.dtbo
+*.tmp
+build/
+output/
+__pycache__/
+*.pyc
+modules-only.symvers
+board.dtb
