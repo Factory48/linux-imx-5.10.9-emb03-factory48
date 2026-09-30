@@ -1335,4 +1335,6 @@ config VIDEO_LM3646
 	  flash, torch LEDs.
 endmenu
 
+source "drivers/media/i2c/emb03/Kconfig"
+
 endif # VIDEO_V4L2

@@ -1,0 +1,10 @@
+config VIDEO_GC2145_EMB03
+	tristate "EMB03 GC2145 board-specific offline candidate"
+	depends on I2C && OF && GPIOLIB && VIDEO_V4L2 && MEDIA_CONTROLLER
+	depends on VIDEO_V4L2_SUBDEV_API
+	select V4L2_FWNODE
+	help
+	  Original EMB03 GPIO sequencing and single-lane 1280x720 UYVY.
+	  Requires exclusive CSI selector ownership and disabled OV5640.
+	  Uses factory48,emb03-gc2145 (or legacy polyhex,emb03-gc2145), not the generic gc2145 compatible.
+	  No clock frequency is inferred. Not enabled by default.
