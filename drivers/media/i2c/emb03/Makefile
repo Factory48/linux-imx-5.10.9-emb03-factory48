@@ -1,0 +1,1 @@
+obj-$(CONFIG_VIDEO_GC2145_EMB03) += gc2145-emb03.o
