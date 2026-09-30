@@ -809,6 +809,19 @@ static int pca9450_i2c_probe(struct i2c_client *i2c,
 	dev_info(&i2c->dev, "%s probed.\n",
 		type == PCA9450_TYPE_PCA9450A ? "pca9450a" : "pca9450bc");
 
+	/* EMB03 firmware writes LDO4CTRL=0xdf after regulator registration.
+	 * Guard by an explicit board property: never apply to unrelated EVKs.
+	 * Supports standard factory48 property with fallback compatibility for legacy boards.
+	 * See evidence/reverse/pca9450_i2c_probe.asm (0xffff80001086c518).
+	 */
+	if (of_property_read_bool(i2c->dev.of_node, "factory48,emb03-ldo4-init") ||
+	    of_property_read_bool(i2c->dev.of_node, "polyhex,emb03-ldo4-init")) {
+		ret = regmap_write(pca9450->regmap, PCA9450_REG_LDO4CTRL, 0xdf);
+		if (ret)
+			return ret;
+	}
+
+
 	return 0;
 }
 
