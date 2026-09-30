@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
+obj-$(CONFIG_MACH_IMX_BLUETOOTH_RFKILL) += mx8_bt_rfkill.o
 #
 # Makefile for the Linux Bluetooth HCI device drivers.
 #
