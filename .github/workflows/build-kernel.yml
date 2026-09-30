@@ -1,0 +1,186 @@
+name: Build EMB03 Linux Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_target:
+        description: 'Build target (e.g. Image, modules, Image modules)'
+        required: true
+        default: 'Image modules'
+        type: string
+      upload_artifacts:
+        description: 'Upload build artifacts'
+        required: true
+        default: true
+        type: boolean
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  build:
+    name: Build Kernel (5.10.9-emb03-factory48)
+    runs-on: ubuntu-22.04
+
+    env:
+      ARCH: arm64
+      LLVM: 1
+      LLVM_IAS: 1
+      CROSS_COMPILE: aarch64-linux-gnu-
+      CLANG_TRIPLE: aarch64-linux-gnu-
+      KCFLAGS: -Werror=incompatible-pointer-types
+      KBUILD_BUILD_USER: Factory48
+      KBUILD_BUILD_HOST: factory48-ci
+      KBUILD_BUILD_TIMESTAMP: ""
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_SLOPPINESS: time_macros,file_macro
+      CLANG_VERSION: r383902b
+      CLANG_URL: https://codeload.github.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-6573524/tar.gz/1443e88db38ee425859b5f08e766926829f56496
+      CLANG_TAR_SHA256: 3716d38c8de7feddab72d88ac967ea699e9d3e0650f0f44fa4046dd9ef91c6af
+      TOOLCHAIN_DIR: ${{ github.workspace }}/toolchains/clang-r383902b
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Host Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache flex libelf-dev libssl-dev \
+            libncurses-dev kmod python3 xz-utils curl tar
+
+      - name: Cache Clang Toolchain (r383902b)
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TOOLCHAIN_DIR }}
+          key: toolchain-clang-r383902b-6573524-v1
+
+      - name: Download & Extract Clang Toolchain
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p toolchains/tmp
+          echo "Downloading Android Clang toolchain r383902b..."
+          curl -L -s --retry 3 "${{ env.CLANG_URL }}" -o toolchains/tmp/clang-6573524.tar.gz
+          echo "${{ env.CLANG_TAR_SHA256 }}  toolchains/tmp/clang-6573524.tar.gz" | sha256sum -c -
+          mkdir -p "${{ env.TOOLCHAIN_DIR }}"
+          tar -xzf toolchains/tmp/clang-6573524.tar.gz -C "${{ env.TOOLCHAIN_DIR }}" --strip-components=1
+          rm -rf toolchains/tmp
+          echo "Toolchain extracted successfully."
+
+      - name: Verify Toolchain
+        run: |
+          "${{ env.TOOLCHAIN_DIR }}/bin/clang" --version
+          "${{ env.TOOLCHAIN_DIR }}/bin/ld.lld" --version
+
+      - name: Setup Ccache Environment
+        run: |
+          mkdir -p "$CCACHE_DIR"
+          mkdir -p "${{ github.workspace }}/.ccache-bin"
+          ln -sf /usr/bin/ccache "${{ github.workspace }}/.ccache-bin/clang"
+          ln -sf /usr/bin/ccache "${{ github.workspace }}/.ccache-bin/clang++"
+          ln -sf /usr/bin/ccache "${{ github.workspace }}/.ccache-bin/gcc"
+          ln -sf /usr/bin/ccache "${{ github.workspace }}/.ccache-bin/g++"
+          ccache --set-config=max_size=2.5G
+          ccache --set-config=compression=true
+          echo "${{ github.workspace }}/.ccache-bin" >> $GITHUB_PATH
+          echo "${{ env.TOOLCHAIN_DIR }}/bin" >> $GITHUB_PATH
+
+      - name: Restore Ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-kernel-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            ccache-kernel-${{ github.ref_name }}-
+            ccache-kernel-emb03-factory48-
+            ccache-kernel-main-
+            ccache-kernel-
+
+      - name: Zero Ccache Statistics
+        run: |
+          ccache -z
+
+      - name: Configure Kernel
+        run: |
+          mkdir -p build/out
+          if [ -f arch/arm64/configs/emb03_factory48_defconfig ]; then
+            make -C "$GITHUB_WORKSPACE" O="$GITHUB_WORKSPACE/build/out" \
+              ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
+              emb03_factory48_defconfig
+          else
+            echo "ERROR: emb03_factory48_defconfig not found!" >&2
+            exit 1
+          fi
+          # Verify extra firmware path is present
+          if [ ! -f "imx/sdma/sdma-imx7d.bin" ]; then
+            echo "ERROR: imx/sdma/sdma-imx7d.bin firmware missing!" >&2
+            exit 1
+          fi
+
+      - name: Build Kernel Image & Modules
+        run: |
+          NPROC=$(nproc)
+          TARGETS="${{ github.event.inputs.build_target || 'Image modules' }}"
+          echo "Building targets: $TARGETS with $NPROC parallel jobs..."
+          
+          make -C "$GITHUB_WORKSPACE" O="$GITHUB_WORKSPACE/build/out" \
+            ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
+            KCFLAGS="-Werror=incompatible-pointer-types" \
+            -j"$NPROC" $TARGETS
+
+      - name: Display Ccache Statistics
+        run: |
+          ccache -s
+
+      - name: Package Kernel & Modules Artifacts
+        run: |
+          mkdir -p dist
+          # Copy Image and core artifacts
+          cp build/out/arch/arm64/boot/Image dist/Image
+          cp build/out/System.map dist/System.map
+          cp build/out/Module.symvers dist/Module.symvers
+          cp build/out/.config dist/kernel.config
+          
+          # Install and package modules
+          mkdir -p dist/modules
+          make -C "$GITHUB_WORKSPACE" O="$GITHUB_WORKSPACE/build/out" \
+            ARCH=arm64 INSTALL_MOD_PATH="$GITHUB_WORKSPACE/dist/modules" \
+            modules_install
+          
+          cd dist
+          tar -czf modules.tar.gz -C modules .
+          rm -rf modules
+          
+          # Compute SHA256 checksums
+          sha256sum Image modules.tar.gz System.map Module.symvers kernel.config > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload Build Artifacts
+        if: ${{ github.event.inputs.upload_artifacts != 'false' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-5.10.9-emb03-factory48
+          path: dist/
+          retention-days: 14
+
+      - name: Create Release on Tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Image
+            dist/modules.tar.gz
+            dist/kernel.config
+            dist/Module.symvers
+            dist/System.map
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
