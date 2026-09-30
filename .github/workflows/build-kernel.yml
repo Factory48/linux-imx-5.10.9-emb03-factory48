@@ -35,6 +35,7 @@ jobs:
       CROSS_COMPILE: aarch64-linux-gnu-
       CLANG_TRIPLE: aarch64-linux-gnu-
       KCFLAGS: -Werror=incompatible-pointer-types
+      LOCALVERSION: ""
       KBUILD_BUILD_USER: Factory48
       KBUILD_BUILD_HOST: factory48-ci
       KBUILD_BUILD_TIMESTAMP: ""
@@ -114,6 +115,7 @@ jobs:
       - name: Configure Kernel
         run: |
           mkdir -p build/out
+          touch .scmversion
           if [ -f arch/arm64/configs/emb03_factory48_defconfig ]; then
             make -C "$GITHUB_WORKSPACE" O="$GITHUB_WORKSPACE/build/out" \
               ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
