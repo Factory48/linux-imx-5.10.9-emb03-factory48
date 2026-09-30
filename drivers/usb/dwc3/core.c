@@ -23,6 +23,7 @@
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/of.h>
+#include <linux/gpio/consumer.h>
 #include <linux/acpi.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/reset.h>
@@ -1678,6 +1679,37 @@ static void dwc3_check_params(struct dwc3 *dwc)
 	}
 }
 
+/* Legacy board properties: power first, then reset before core startup. */
+static int dwc3_hub_init(struct device *dev)
+{
+	struct gpio_desc *gpio;
+
+	if (!dev->of_node)
+		return 0;
+
+	if (of_find_property(dev->of_node, "hub-pwd-gpio", NULL)) {
+		gpio = devm_gpiod_get_from_of_node(dev, dev->of_node,
+				"hub-pwd-gpio", 0, GPIOD_OUT_HIGH, "HUB_PWD");
+		if (IS_ERR(gpio))
+			return dev_err_probe(dev, PTR_ERR(gpio),
+					     "failed to initialize hub power GPIO\n");
+	}
+
+	if (of_find_property(dev->of_node, "hub-reset-gpio", NULL)) {
+		gpio = devm_gpiod_get_from_of_node(dev, dev->of_node,
+				"hub-reset-gpio", 0, GPIOD_OUT_HIGH, "HUB_RST");
+		if (IS_ERR(gpio))
+			return dev_err_probe(dev, PTR_ERR(gpio),
+					     "failed to initialize hub reset GPIO\n");
+		/* Logical assertion: active-low boards drive low, then high. */
+		msleep(200);
+		gpiod_set_value_cansleep(gpio, 0);
+		msleep(50);
+	}
+
+	return 0;
+}
+
 static int dwc3_probe(struct platform_device *pdev)
 {
 	struct device		*dev = &pdev->dev;
@@ -1727,6 +1759,10 @@ static int dwc3_probe(struct platform_device *pdev)
 	dwc->reset = devm_reset_control_array_get_optional_shared(dev);
 	if (IS_ERR(dwc->reset))
 		return PTR_ERR(dwc->reset);
+
+	ret = dwc3_hub_init(dev);
+	if (ret)
+		return ret;
 
 	if (dev->of_node) {
 		ret = devm_clk_bulk_get_all(dev, &dwc->clks);
