@@ -580,6 +580,8 @@ static void option_instat_callback(struct urb *urb);
 
 
 static const struct usb_device_id option_ids[] = {
+	/* EMB03 L716CN: interfaces 2-6; preserve ECM and modem ADB. */
+	{ USB_DEVICE_AND_INTERFACE_INFO(0x2cb7, 0x0001, 0xff, 0xff, 0xff) },
 	{ USB_DEVICE(OPTION_VENDOR_ID, OPTION_PRODUCT_COLT) },
 	{ USB_DEVICE(OPTION_VENDOR_ID, OPTION_PRODUCT_RICOLA) },
 	{ USB_DEVICE(OPTION_VENDOR_ID, OPTION_PRODUCT_RICOLA_LIGHT) },
