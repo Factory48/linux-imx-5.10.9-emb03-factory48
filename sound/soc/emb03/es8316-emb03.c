@@ -245,6 +245,57 @@ static int es8316_set_dai_fmt(struct snd_soc_dai *codec_dai,
 	return es8316_result(component);
 }
 
+/*
+ * Headphone path power sequencing.
+ *
+ * Writing the whole chain at once makes an audible pop on both power-up and
+ * power-down. Bring the charge pump up and let it settle before the mixer and
+ * the output drivers are enabled, and tear down in the reverse order. The DAC
+ * stays muted for the whole sequence (see codec_mute()), so only the analog
+ * rails move. Register values are the same as the one-shot sequence; only the
+ * order and the settle delays differ.
+ */
+static void es8316_hp_power_up(struct snd_soc_component *component)
+{
+	factory_write(component, ES8316_SYS_LP1_REG0E, 0x3F);
+	factory_write(component, ES8316_SYS_LP2_REG0F, 0x1F);
+	factory_write(component, ES8316_CPHP_PDN2_REG1A, 0x10);
+	factory_write(component, ES8316_CPHP_LDOCTL_REG1B, 0x30);
+	msleep(100);
+	factory_write(component, ES8316_CPHP_PDN1_REG19, 0x02);
+	msleep(20);
+	factory_write(component, ES8316_HPMIX_SWITCH_REG14, 0x88);
+	factory_write(component, ES8316_HPMIX_PDN_REG15, 0x00);
+	factory_write(component, ES8316_HPMIX_VOL_REG16, 0xBB);
+	factory_write(component, ES8316_DAC_PDN_REG2F, 0x00);
+	msleep(30);
+	/* charge pumps first, output drivers last */
+	factory_write(component, ES8316_CPHP_OUTEN_REG17, 0x44);
+	msleep(20);
+	factory_write(component, ES8316_CPHP_OUTEN_REG17, 0x66);
+}
+
+static void es8316_hp_power_down(struct snd_soc_component *component)
+{
+	/* output drivers first, charge pumps last */
+	factory_write(component, ES8316_CPHP_OUTEN_REG17, 0x44);
+	msleep(20);
+	factory_write(component, ES8316_CPHP_OUTEN_REG17, 0x00);
+	msleep(30);
+	factory_write(component, ES8316_DAC_PDN_REG2F, 0x11);
+	factory_write(component, ES8316_HPMIX_SWITCH_REG14, 0x00);
+	factory_write(component, ES8316_HPMIX_PDN_REG15, 0x33);
+	factory_write(component, ES8316_HPMIX_VOL_REG16, 0x00);
+	msleep(20);
+	factory_write(component, ES8316_CPHP_PDN1_REG19, 0x06);
+	msleep(20);
+	factory_write(component, ES8316_CPHP_LDOCTL_REG1B, 0x03);
+	factory_write(component, ES8316_CPHP_PDN2_REG1A, 0x22);
+	msleep(20);
+	factory_write(component, ES8316_SYS_LP1_REG0E, 0xFF);
+	factory_write(component, ES8316_SYS_LP2_REG0F, 0xFF);
+}
+
 static int es8316_pcm_startup(struct snd_pcm_substream *substream,
 			      struct snd_soc_dai *dai)
 {
@@ -263,16 +314,7 @@ static int es8316_pcm_startup(struct snd_pcm_substream *substream,
 	es8316->pwr_count++;
 
 	if (playback) {
-		factory_write(component, ES8316_SYS_LP1_REG0E, 0x3F);
-		factory_write(component, ES8316_SYS_LP2_REG0F, 0x1F);
-		factory_write(component, ES8316_HPMIX_SWITCH_REG14, 0x88);
-		factory_write(component, ES8316_HPMIX_PDN_REG15, 0x00);
-		factory_write(component, ES8316_HPMIX_VOL_REG16, 0xBB);
-		factory_write(component, ES8316_CPHP_PDN2_REG1A, 0x10);
-		factory_write(component, ES8316_CPHP_LDOCTL_REG1B, 0x30);
-		factory_write(component, ES8316_CPHP_PDN1_REG19, 0x02);
-		factory_write(component, ES8316_DAC_PDN_REG2F, 0x00);
-		factory_write(component, ES8316_CPHP_OUTEN_REG17, 0x66);
+		es8316_hp_power_up(component);
 		factory_update(component, ES8316_CLKMGR_CLKSW_REG01,
 				    ES8316_CLKMGR_DAC_MCLK_MASK |
 				    ES8316_CLKMGR_DAC_ANALOG_MASK,
@@ -301,17 +343,8 @@ static void es8316_pcm_shutdown(struct snd_pcm_substream *substream,
 	bool playback = (substream->stream == SNDRV_PCM_STREAM_PLAYBACK);
 
 	if (playback) {
-		factory_write(component, ES8316_CPHP_OUTEN_REG17, 0x00);
-		factory_write(component, ES8316_DAC_PDN_REG2F, 0x11);
-		factory_write(component, ES8316_CPHP_LDOCTL_REG1B, 0x03);
-		factory_write(component, ES8316_CPHP_PDN2_REG1A, 0x22);
-		factory_write(component, ES8316_CPHP_PDN1_REG19, 0x06);
-		factory_write(component, ES8316_HPMIX_SWITCH_REG14, 0x00);
-		factory_write(component, ES8316_HPMIX_PDN_REG15, 0x33);
-		factory_write(component, ES8316_HPMIX_VOL_REG16, 0x00);
+		es8316_hp_power_down(component);
 		factory_write(component, ES8316_SYS_PDN_REG0D, 0x00);
-		factory_write(component, ES8316_SYS_LP1_REG0E, 0xFF);
-		factory_write(component, ES8316_SYS_LP2_REG0F, 0xFF);
 		snd_soc_component_update_bits (component, ES8316_CLKMGR_CLKSW_REG01,
 				    ES8316_CLKMGR_DAC_ANALOG_MASK,
 				    ES8316_CLKMGR_DAC_ANALOG_DIS);
