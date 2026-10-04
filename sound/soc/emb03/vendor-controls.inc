@@ -1,4 +1,4 @@
-/* GPL-2.0: reviewed DEBIX controls/DAPM; see README.md. */
+/* GPL-2.0: reviewed DEBIX controls/DAPM fragments. */
 static const DECLARE_TLV_DB_SCALE(dac_vol_tlv, -9600, 50, 1);
 static const DECLARE_TLV_DB_SCALE(adc_vol_tlv, -9600, 50, 1);
 static const SNDRV_CTL_TLVD_DECLARE_DB_RANGE(hpmixer_gain_tlv,

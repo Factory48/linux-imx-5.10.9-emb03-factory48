@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /* EMB03 candidate. Vendor register definitions/controls copyright Everest.
- * Factory-compatible PCM rates; codec master, unchanged board clock. See README.md.
+ * Factory-compatible PCM rates; codec master, unchanged board clock.
  * Shared PMIC LDO4 is deliberately NOT owned or switched by this driver.
  */
 #include <linux/clk.h>
