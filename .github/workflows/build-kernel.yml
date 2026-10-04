@@ -15,7 +15,7 @@ on:
         type: boolean
   push:
     branches:
-      - 'emb03-factory48'
+      - 'main'
     tags:
       - 'v*'
 
