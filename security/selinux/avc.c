@@ -30,6 +30,8 @@
 #include "avc.h"
 #include "avc_ss.h"
 #include "classmap.h"
+#include "ss/services.h"
+#include "ss/sidtab.h"
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/avc.h>
@@ -758,6 +760,70 @@ static void avc_audit_post_callback(struct audit_buffer *ab, void *a)
 	}
 }
 
+static bool avc_test_maintenance_denial(struct selinux_state *state,
+				      u32 ssid, u32 tsid,
+				      struct common_audit_data *a)
+{
+	struct selinux_policy *policy;
+	struct context *source, *target;
+	const char *source_type, *target_type;
+	struct dentry *dentry = NULL;
+	bool sensitive = false;
+
+	rcu_read_lock();
+	policy = rcu_dereference(state->policy);
+	if (!policy)
+		goto out;
+	source = sidtab_search(policy->sidtab, ssid);
+	target = sidtab_search(policy->sidtab, tsid);
+	if (!source || !target || !source->type || !target->type ||
+	    source->type > policy->policydb.p_types.nprim ||
+	    target->type > policy->policydb.p_types.nprim)
+		goto out;
+	source_type = sym_name(&policy->policydb, SYM_TYPES, source->type - 1);
+	target_type = sym_name(&policy->policydb, SYM_TYPES, target->type - 1);
+	if (!source_type || !target_type ||
+	    (strcmp(source_type, "untrusted_app") &&
+	     strncmp(source_type, "untrusted_app_", sizeof("untrusted_app_") - 1)))
+		goto out;
+
+	/* The stock label covers /data/adb and its children without pathname
+	 * allocation, traversal races, or a broad substring match.
+	 */
+	if (!strcmp(target_type, "adb_data_file")) {
+		sensitive = true;
+		goto out;
+	}
+	if (!a)
+		goto out;
+	switch (a->type) {
+	case LSM_AUDIT_DATA_PATH:
+		dentry = a->u.path.dentry;
+		break;
+	case LSM_AUDIT_DATA_DENTRY:
+		dentry = a->u.dentry;
+		break;
+	case LSM_AUDIT_DATA_FILE:
+		if (a->u.file)
+			dentry = a->u.file->f_path.dentry;
+		break;
+	case LSM_AUDIT_DATA_IOCTL_OP:
+		if (a->u.op)
+			dentry = a->u.op->path.dentry;
+		break;
+	}
+	if (dentry) {
+		spin_lock(&dentry->d_lock);
+		sensitive = !strcmp(dentry->d_name.name, "su") ||
+			    !strcmp(dentry->d_name.name, "ksu") ||
+			    !strcmp(dentry->d_name.name, "ksud");
+		spin_unlock(&dentry->d_lock);
+	}
+out:
+	rcu_read_unlock();
+	return sensitive;
+}
+
 /* This is the slow part of avc audit with big stack footprint */
 noinline int slow_avc_audit(struct selinux_state *state,
 			    u32 ssid, u32 tsid, u16 tclass,
@@ -769,6 +835,13 @@ noinline int slow_avc_audit(struct selinux_state *state,
 
 	if (WARN_ON(!tclass || tclass >= ARRAY_SIZE(secclass_map)))
 		return -EINVAL;
+	/* Filter before common_lsm_audit creates the record. This does not
+	 * change the AVC decision or suppress maintenance/system diagnostics.
+	 */
+	if (denied && result == -EACCES &&
+	    avc_test_maintenance_denial(state, ssid, tsid, a))
+		return 0;
+
 
 	if (!a) {
 		a = &stack_data;
