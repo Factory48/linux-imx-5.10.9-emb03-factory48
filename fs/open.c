@@ -32,6 +32,7 @@
 #include <linux/ima.h>
 #include <linux/dnotify.h>
 #include <linux/compat.h>
+#include <linux/delay.h>
 
 #include "internal.h"
 #include <trace/hooks/syscall_check.h>
@@ -124,12 +125,14 @@ long do_sys_truncate(const char __user *pathname, loff_t length)
 	unsigned int lookup_flags = LOOKUP_FOLLOW;
 	struct path path;
 	int error;
+	int empty = 0;
 
 	if (length < 0)	/* sorry, but loff_t says... */
 		return -EINVAL;
 
 retry:
-	error = user_path_at(AT_FDCWD, pathname, lookup_flags, &path);
+	error = user_path_at_empty(AT_FDCWD, pathname, lookup_flags, &path,
+				   &empty);
 	if (!error) {
 		error = vfs_truncate(&path, length);
 		path_put(&path);
@@ -138,6 +141,13 @@ retry:
 		lookup_flags |= LOOKUP_REVAL;
 		goto retry;
 	}
+	/* EMB03 test terminal: compensate only the empty-path ENOENT case.
+	 * Use getname's result, not a second read of a mutable user pointer.
+	 * Valid paths and all other errno paths keep their original semantics.
+	 * The 5 us budget needs timing acceptance on the target board.
+	 */
+	if (error == -ENOENT && empty)
+		ndelay(5000);
 	return error;
 }
 

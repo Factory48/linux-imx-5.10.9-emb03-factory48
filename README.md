@@ -23,6 +23,25 @@ Based on NXP official Android BSP release `android-11.0.0_2.0.0` (commit `24e30e
 
 ---
 
+## v10 Dedicated Test-Terminal Kernel
+
+The `dev` cutover is for an owner-controlled EMB03 acceptance terminal, not a
+production trust claim. `/proc/cmdline` presents a software boot-state view;
+the kernel's saved command line, U-Boot, physical unlock state and eFuses remain
+unchanged. Empty-path `truncate` failures receive a 5 microsecond compensation
+budget that still requires timing calibration on the target board.
+
+Privilege entry requires init-namespace UID/euid 2000 in the SELinux `shell`
+domain. Credentials are replaced with the standard COW API, seccomp is retained,
+and application allowlists cannot grant privilege. Runtime SELinux policy
+mutation and PTY relabeling are removed. Maintenance permissions must be supplied
+by the matching, compiled firmware policy: **do not deploy this kernel alone on
+the old firmware**. Application maintenance-path AVC decisions remain denied;
+only their audit records are filtered before creation. System-domain diagnostics
+are retained. OTA installation and reboot remain explicit human actions; CI only
+builds offline artifacts.
+
+
 ## Build Instructions
 
 ### Prerequisites
