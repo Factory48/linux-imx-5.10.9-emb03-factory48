@@ -1,11 +1,13 @@
-# Linux 5.10.9 Kernel for EMB03
+# Linux 5.10.72 Kernel for EMB03
 
 [![Build EMB03 Linux Kernel](https://github.com/Factory48/linux-imx-5.10.9-emb03-factory48/actions/workflows/build-kernel.yml/badge.svg)](https://github.com/Factory48/linux-imx-5.10.9-emb03-factory48/actions/workflows/build-kernel.yml)
 [![License: GPL-2.0](https://img.shields.io/badge/License-GPL%202.0-blue.svg)](COPYING)
 
 Production Linux kernel source tree for the **EMB03** hardware platform (NXP i.MX8M Plus), maintained by **Factory48 Labs** (Singapore).
 
-Based on NXP official Android BSP release `android-11.0.0_2.0.0` (commit `24e30e721438600a496bcf1ae44cb4d7c93eafd8`, Linux kernel version `5.10.9-emb03-factory48`).
+Based on NXP official Android BSP release `android-11.0.0_2.6.0` (commit `f0b39243c99211907acb9cb3d332ab466e76d089`, Linux kernel version `5.10.72-emb03`). The EMB03 changes were re-applied on top of the unmodified 2.6.0 tree; all NXP SoC drivers (GPU `galcore`, Hantro VPU, SAI, ISI, DWC3, …) are the 2.6.0 versions.
+
+The GPU kernel driver (`galcore` 6.4.3 build 336687) must be paired with the Vivante user-space libraries from the same 2.6.0 release (`vendor/nxp/fsl-proprietary/gpu-viv`); the 2.0.0 user-space libraries do not match this kernel.
 
 ---
 

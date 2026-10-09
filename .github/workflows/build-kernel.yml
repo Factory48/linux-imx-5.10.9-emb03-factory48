@@ -25,7 +25,7 @@ permissions:
 
 jobs:
   build:
-    name: Build Kernel (5.10.9-emb03)
+    name: Build Kernel (5.10.72-emb03)
     runs-on: ubuntu-22.04
 
     env:
@@ -136,6 +136,13 @@ jobs:
             echo "ERROR: emb03_factory48_defconfig not found!" >&2
             exit 1
           fi
+          # The defconfig is a full resolved config: fail if Kconfig would silently change any symbol.
+          diff <(grep -E '^(CONFIG_|# CONFIG_)' arch/arm64/configs/emb03_factory48_defconfig | sort) \
+               <(grep -E '^(CONFIG_|# CONFIG_)' build/out/.config | sort) > build/defconfig-drift.txt || {
+            echo "ERROR: emb03_factory48_defconfig is not a fixed point of Kconfig:" >&2
+            cat build/defconfig-drift.txt >&2
+            exit 1
+          }
           # Verify extra firmware path is present
           if [ ! -f "imx/sdma/sdma-imx7d.bin" ]; then
             echo "ERROR: imx/sdma/sdma-imx7d.bin firmware missing!" >&2
@@ -184,7 +191,7 @@ jobs:
         if: ${{ github.event.inputs.upload_artifacts != 'false' }}
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-5.10.9-emb03
+          name: kernel-5.10.72-emb03
           path: dist/
           retention-days: 14
 
