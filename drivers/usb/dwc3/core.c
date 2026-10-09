@@ -1844,6 +1844,18 @@ assert_reset:
 	return ret;
 }
 
+/*
+ * Host role, system sleep: keep the controller alive (PHY suspended, xHCI
+ * state kept, link in U3/L2) instead of tearing the core down, when the glue
+ * device is allowed to wake the system. Downstream devices (the board's LTE
+ * modem) can then signal remote wakeup, and resume needs no re-enumeration.
+ * Without wakeup permission the original teardown is kept.
+ */
+static bool dwc3_host_keep_on_sleep(struct dwc3 *dwc)
+{
+	return dwc->dev->parent && device_may_wakeup(dwc->dev->parent);
+}
+
 static int dwc3_suspend_common(struct dwc3 *dwc, pm_message_t msg)
 {
 	unsigned long	flags;
@@ -1865,10 +1877,18 @@ static int dwc3_suspend_common(struct dwc3 *dwc, pm_message_t msg)
 		dwc3_core_exit(dwc);
 		break;
 	case DWC3_GCTL_PRTCAP_HOST:
-		if (!PMSG_IS_AUTO(msg)) {
+		if (!PMSG_IS_AUTO(msg) && !dwc3_host_keep_on_sleep(dwc)) {
+			dwc->host_sleep = DWC3_HOST_SLEEP_TORN_DOWN;
 			dwc3_core_exit(dwc);
 			break;
 		}
+		/* system sleep on top of runtime suspend: PHYs already put */
+		if (!PMSG_IS_AUTO(msg) && pm_runtime_suspended(dwc->dev)) {
+			dwc->host_sleep = DWC3_HOST_SLEEP_SKIPPED;
+			break;
+		}
+		if (!PMSG_IS_AUTO(msg))
+			dwc->host_sleep = DWC3_HOST_SLEEP_KEPT;
 
 		/* Let controller to suspend HSPHY before PHY driver suspends */
 		if (dwc->dis_u2_susphy_quirk ||
@@ -1944,11 +1964,22 @@ static int dwc3_resume_common(struct dwc3 *dwc, pm_message_t msg)
 		break;
 	case DWC3_GCTL_PRTCAP_HOST:
 		if (!PMSG_IS_AUTO(msg)) {
-			ret = dwc3_core_init_for_resume(dwc);
-			if (ret)
-				return ret;
-			dwc3_set_prtcap(dwc, DWC3_GCTL_PRTCAP_HOST);
-			break;
+			enum dwc3_host_sleep how = dwc->host_sleep;
+
+			dwc->host_sleep = DWC3_HOST_SLEEP_NONE;
+			if (how == DWC3_HOST_SLEEP_TORN_DOWN) {
+				ret = dwc3_core_init_for_resume(dwc);
+				if (ret)
+					return ret;
+				dwc3_set_prtcap(dwc, DWC3_GCTL_PRTCAP_HOST);
+				break;
+			}
+			/*
+			 * KEPT or SKIPPED: the PHYs are suspended (by this
+			 * system suspend or by an earlier runtime suspend).
+			 * dwc3_resume() marks the device runtime active, so
+			 * restore them here in both cases.
+			 */
 		}
 		/* Restore GUSB2PHYCFG bits that were modified in suspend */
 		reg = dwc3_readl(dwc->regs, DWC3_GUSB2PHYCFG(0));
