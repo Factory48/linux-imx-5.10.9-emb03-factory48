@@ -49,13 +49,13 @@ builds offline artifacts.
 ### Prerequisites
 - Host OS: Ubuntu 20.04 / 22.04 LTS x86_64
 - Host tools: `build-essential`, `bc`, `bison`, `flex`, `libssl-dev`, `libelf-dev`, `python3`, `ccache`
-- Cross Toolchain: Android Clang `r383902b` (`clang-6573524` / LLVM 11.0.2)
+- Cross Toolchain: Android Clang `r416183b` (`clang-7284624` / LLVM 12.0.5), the toolchain NXP uses for 2.6.0
 
 ### Building Locally
 
 ```bash
 # 1. Export toolchain to PATH
-export PATH="/path/to/clang-r383902b/bin:$PATH"
+export PATH="/path/to/clang-r416183b/bin:$PATH"
 export CLANG_TRIPLE=aarch64-linux-gnu-
 
 # 2. Configure kernel
