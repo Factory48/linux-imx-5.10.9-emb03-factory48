@@ -1315,6 +1315,7 @@ int brcmf_alloc(struct device *dev, struct brcmf_mp_device *settings)
 	drvr->bus_if = dev_get_drvdata(dev);
 	drvr->bus_if->drvr = drvr;
 	drvr->settings = settings;
+	init_waitqueue_head(&drvr->bus_up_wait);
 
 	return 0;
 }
@@ -1515,6 +1516,7 @@ void brcmf_bus_change_state(struct brcmf_bus *bus, enum brcmf_bus_state state)
 					netif_wake_queue(ndev);
 			}
 		}
+		wake_up_all(&drvr->bus_up_wait);
 	}
 }
 

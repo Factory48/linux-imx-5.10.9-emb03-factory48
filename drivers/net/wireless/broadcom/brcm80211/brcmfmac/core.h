@@ -136,6 +136,11 @@ struct brcmf_pub {
 	struct work_struct bus_reset;
 
 	u8 clmver[BRCMF_DCMD_SMLEN];
+
+	/* woken when the bus interface becomes BRCMF_BUS_UP (e.g. SDIO DPC
+	 * thawed after system resume)
+	 */
+	wait_queue_head_t bus_up_wait;
 };
 
 /* forward declarations */
