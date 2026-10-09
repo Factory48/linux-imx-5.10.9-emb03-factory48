@@ -287,6 +287,12 @@ struct brcmf_cfg80211_vif_event {
  * @nd_data_wait: wait queue to sync net detect data.
  * @nd_data_completed: completion for net detect data.
  * @nd_enabled: net detect enabled.
+ * @config_lost: a cleared WoWLAN configuration could not be restored; suspend
+ *	is refused until it is, since cfg80211 would leave the AP.
+ * @wake_count: resumes whose firmware wake indicator showed a board pattern.
+ * @restore_count: cleared configurations restored by brcmf_cfg80211_set_wakeup.
+ * @mac: station MAC the board patterns were last built with (diagnostics only,
+ *	so debugfs never touches interface memory).
  */
 struct brcmf_cfg80211_wowl {
 	bool active;
@@ -296,6 +302,10 @@ struct brcmf_cfg80211_wowl {
 	wait_queue_head_t nd_data_wait;
 	bool nd_data_completed;
 	bool nd_enabled;
+	bool config_lost;
+	u32 wake_count;
+	u32 restore_count;
+	u8 mac[ETH_ALEN];
 };
 
 /**

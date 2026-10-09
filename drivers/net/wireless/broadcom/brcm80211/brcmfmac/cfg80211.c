@@ -6,6 +6,8 @@
 /* Toplevel file. Relies on dhd_linux.c to send commands to the dongle. */
 
 #include <linux/kernel.h>
+#include <linux/rtnetlink.h>
+#include <linux/seq_file.h>
 #include <linux/etherdevice.h>
 #include <linux/module.h>
 #include <linux/vmalloc.h>
@@ -3746,6 +3748,9 @@ static void brcmf_report_wowl_wakeind(struct wiphy *wiphy, struct brcmf_if *ifp)
 	}
 
 	wakeind = le32_to_cpu(wake_ind_le.ucode_wakeind);
+	brcmf_info("wowl wakeind=0x%08x\n", wakeind);
+	if (wakeind & BRCMF_WOWL_NET)
+		cfg->wowl.wake_count++;
 	if (wakeind & (BRCMF_WOWL_MAGIC | BRCMF_WOWL_DIS | BRCMF_WOWL_BCN |
 		       BRCMF_WOWL_RETR | BRCMF_WOWL_NET |
 		       BRCMF_WOWL_PFN_FOUND)) {
@@ -3857,13 +3862,97 @@ static s32 brcmf_cfg80211_resume(struct wiphy *wiphy)
 	return 0;
 }
 
-static void brcmf_configure_wowl(struct brcmf_cfg80211_info *cfg,
-				 struct brcmf_if *ifp,
-				 struct cfg80211_wowlan *wowl)
+/* Board wake patterns (docs/sleep-wake-review/PUSH-WAKE-PLAN.md §2.1).
+ *
+ * Only TCP segments that carry data, and new connections to adb (5555), may
+ * wake the host; pure ACKs and keepalive probes may not. A firmware bitmap
+ * mask has one bit per pattern byte, so every field is whole-byte equality.
+ * Offsets are into the Ethernet II frame starting at the destination MAC:
+ * IPv4 header at 14 (IHL=5), TCP at 34; IPv6 header at 14, TCP at 54.
+ * Byte 0..5 is filled with the station MAC when the patterns are programmed.
+ */
+#define BRCMF_WOWL_BOARD_PATLEN		68
+
+struct brcmf_wowl_board_field {
+	u8 off;				/* 0 ends the list (0..5 is the MAC) */
+	u8 val;
+};
+
+#define BRCMF_WOWL_BOARD_MAXFIELDS	8
+
+struct brcmf_wowl_board_pattern {
+	const char *name;
+	u8 len;				/* pattern length, covers last field */
+	struct brcmf_wowl_board_field f[BRCMF_WOWL_BOARD_MAXFIELDS];
+};
+
+#define BRCMF_V4(...)	{ { 12, 0x08 }, { 13, 0x00 }, { 14, 0x45 }, \
+			  { 23, 0x06 }, __VA_ARGS__ }
+#define BRCMF_V6(...)	{ { 12, 0x86 }, { 13, 0xdd }, { 20, 0x06 }, \
+			  __VA_ARGS__ }
+
+static const struct brcmf_wowl_board_pattern brcmf_wowl_board_patterns[] = {
+	/* data segment that ends a write: flags PSH|ACK */
+	{ "v4-psh", 48, BRCMF_V4({ 47, 0x18 }) },
+	{ "v6-psh", 68, BRCMF_V6({ 67, 0x18 }) },
+	/* full-size data without PSH: flags ACK, IP length 1024..1535 */
+	{ "v4-full-04", 48, BRCMF_V4({ 16, 0x04 }, { 47, 0x10 }) },
+	{ "v4-full-05", 48, BRCMF_V4({ 16, 0x05 }, { 47, 0x10 }) },
+	{ "v6-full-04", 68, BRCMF_V6({ 18, 0x04 }, { 67, 0x10 }) },
+	{ "v6-full-05", 68, BRCMF_V6({ 18, 0x05 }, { 67, 0x10 }) },
+	/* new adb connection: SYN to TCP 5555 */
+	{ "v4-syn-5555", 48, BRCMF_V4({ 36, 0x15 }, { 37, 0xb3 }, { 47, 0x02 }) },
+	{ "v6-syn-5555", 68, BRCMF_V6({ 56, 0x15 }, { 57, 0xb3 }, { 67, 0x02 }) },
+};
+
+static void brcmf_wowl_board_build(const struct brcmf_wowl_board_pattern *bp,
+				   const u8 *mac, u8 *pat, u8 *mask)
+{
+	u8 i;
+
+	memset(pat, 0, BRCMF_WOWL_BOARD_PATLEN);
+	memset(mask, 0, DIV_ROUND_UP(BRCMF_WOWL_BOARD_PATLEN, 8));
+	memcpy(pat, mac, ETH_ALEN);
+	for (i = 0; i < ETH_ALEN; i++)
+		mask[i / 8] |= BIT(i % 8);
+	for (i = 0; i < BRCMF_WOWL_BOARD_MAXFIELDS && bp->f[i].off; i++) {
+		pat[bp->f[i].off] = bp->f[i].val;
+		mask[bp->f[i].off / 8] |= BIT(bp->f[i].off % 8);
+	}
+}
+
+static s32 brcmf_wowl_board_program(struct brcmf_cfg80211_info *cfg,
+				    struct brcmf_if *ifp)
+{
+	u8 pat[BRCMF_WOWL_BOARD_PATLEN];
+	u8 mask[DIV_ROUND_UP(BRCMF_WOWL_BOARD_PATLEN, 8)];
+	u32 i;
+	s32 err;
+
+	memcpy(cfg->wowl.mac, ifp->mac_addr, ETH_ALEN);
+	for (i = 0; i < ARRAY_SIZE(brcmf_wowl_board_patterns); i++) {
+		const struct brcmf_wowl_board_pattern *bp =
+			&brcmf_wowl_board_patterns[i];
+
+		brcmf_wowl_board_build(bp, ifp->mac_addr, pat, mask);
+		err = brcmf_config_wowl_pattern(ifp, "add", pat, bp->len,
+						mask, 0);
+		if (err) {
+			bphy_err(ifp->drvr, "wowl pattern %s: %d\n",
+				 bp->name, err);
+			return err;
+		}
+	}
+	return 0;
+}
+
+static s32 brcmf_configure_wowl(struct brcmf_cfg80211_info *cfg,
+				struct brcmf_if *ifp,
+				struct cfg80211_wowlan *wowl)
 {
 	u32 wowl_config;
 	struct brcmf_wowl_wakeind_le wowl_wakeind;
-	u32 i;
+	s32 err;
 
 	brcmf_dbg(TRACE, "Suspend, wowl config.\n");
 
@@ -3872,21 +3961,19 @@ static void brcmf_configure_wowl(struct brcmf_cfg80211_info *cfg,
 	brcmf_fil_cmd_int_get(ifp, BRCMF_C_GET_PM, &cfg->wowl.pre_pmmode);
 	brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_PM, PM_MAX);
 
-	wowl_config = 0;
-	if (wowl->disconnect)
-		wowl_config = BRCMF_WOWL_DIS | BRCMF_WOWL_BCN | BRCMF_WOWL_RETR;
-	if (wowl->magic_pkt)
-		wowl_config |= BRCMF_WOWL_MAGIC;
-	if ((wowl->patterns) && (wowl->n_patterns)) {
-		wowl_config |= BRCMF_WOWL_NET;
-		for (i = 0; i < wowl->n_patterns; i++) {
-			brcmf_config_wowl_pattern(ifp, "add",
-				(u8 *)wowl->patterns[i].pattern,
-				wowl->patterns[i].pattern_len,
-				(u8 *)wowl->patterns[i].mask,
-				wowl->patterns[i].pkt_offset);
-		}
+	/* Board defaults, whatever trigger set cfg80211 holds. Without all
+	 * board patterns the board must not sleep: undo and fail.
+	 */
+	err = brcmf_wowl_board_program(cfg, ifp);
+	if (err) {
+		brcmf_config_wowl_pattern(ifp, "clr", NULL, 0, NULL, 0);
+		if (!brcmf_feat_is_enabled(ifp, BRCMF_FEAT_WOWL_ARP_ND))
+			brcmf_configure_arp_nd_offload(ifp, true);
+		brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_PM, cfg->wowl.pre_pmmode);
+		return err;
 	}
+	wowl_config = BRCMF_WOWL_DIS | BRCMF_WOWL_BCN | BRCMF_WOWL_RETR |
+		      BRCMF_WOWL_MAGIC | BRCMF_WOWL_NET;
 	if (wowl->nd_config) {
 		brcmf_cfg80211_sched_scan_start(cfg->wiphy, ifp->ndev,
 						wowl->nd_config);
@@ -3899,7 +3986,8 @@ static void brcmf_configure_wowl(struct brcmf_cfg80211_info *cfg,
 		brcmf_fweh_register(cfg->pub, BRCMF_E_PFN_NET_FOUND,
 				    brcmf_wowl_nd_results);
 	}
-	if (wowl->gtk_rekey_failure)
+	if (wowl->gtk_rekey_failure ||
+	    brcmf_feat_is_enabled(ifp, BRCMF_FEAT_WOWL_GTK))
 		wowl_config |= BRCMF_WOWL_GTK_FAILURE;
 	if (!test_bit(BRCMF_VIF_STATUS_CONNECTED, &ifp->vif->sme_state))
 		wowl_config |= BRCMF_WOWL_UNASSOC;
@@ -3911,6 +3999,7 @@ static void brcmf_configure_wowl(struct brcmf_cfg80211_info *cfg,
 	brcmf_fil_iovar_int_set(ifp, "wowl_activate", 1);
 	brcmf_bus_wowl_config(cfg->pub->bus_if, true);
 	cfg->wowl.active = true;
+	return 0;
 }
 
 static s32 brcmf_cfg80211_suspend(struct wiphy *wiphy,
@@ -3920,8 +4009,18 @@ static s32 brcmf_cfg80211_suspend(struct wiphy *wiphy,
 	struct net_device *ndev = cfg_to_ndev(cfg);
 	struct brcmf_if *ifp = netdev_priv(ndev);
 	struct brcmf_cfg80211_vif *vif;
+	s32 err = 0;
 
 	brcmf_dbg(TRACE, "Enter\n");
+
+	/* cfg80211 has already left the AP because the configuration was
+	 * cleared and could not be restored: refuse to sleep rather than sleep
+	 * without the board wake patterns.
+	 */
+	if (cfg->wowl.config_lost) {
+		bphy_err(cfg->pub, "WoWLAN configuration lost, refusing suspend\n");
+		return -EBUSY;
+	}
 
 	/* if the primary net_device is not READY there is nothing
 	 * we can do but pray resume goes smoothly.
@@ -3963,15 +4062,15 @@ static s32 brcmf_cfg80211_suspend(struct wiphy *wiphy,
 		brcmf_set_mpc(ifp, 1);
 
 	} else {
-		/* Configure WOWL paramaters */
-		brcmf_configure_wowl(cfg, ifp, wowl);
+		/* Configure WOWL paramaters; refuse to sleep without them */
+		err = brcmf_configure_wowl(cfg, ifp, wowl);
 	}
 
 exit:
 	brcmf_dbg(TRACE, "Exit\n");
 	/* clear any scanning activity */
 	cfg->scan_status = 0;
-	return 0;
+	return err;
 }
 
 static __used s32
@@ -5501,6 +5600,106 @@ static int brcmf_cfg80211_del_pmk(struct wiphy *wiphy, struct net_device *dev,
 	return brcmf_set_pmk(ifp, NULL, 0);
 }
 
+#ifdef CONFIG_PM
+/* Minimal non-NULL WoWLAN configuration. While it is installed cfg80211 does
+ * not leave the AP on suspend and calls brcmf_cfg80211_suspend() with it;
+ * brcmf_configure_wowl() then programs the board patterns. No bitmap patterns
+ * are allocated, so cfg80211_rdev_free_wowlan() only frees this struct.
+ */
+static struct cfg80211_wowlan *brcmf_wowl_board_config(void)
+{
+	struct cfg80211_wowlan *wowl = kzalloc(sizeof(*wowl), GFP_KERNEL);
+
+	if (wowl) {
+		wowl->disconnect = true;
+		wowl->magic_pkt = true;
+	}
+	return wowl;
+}
+
+/* Called after wiphy_register(); wiphy_unregister() owns the allocation.
+ * Waking the host needs no device_set_wakeup_enable(): the SDIO bus arms the
+ * OOB interrupt itself when brcmf_bus_wowl_config() enables WoWLAN.
+ */
+static void brcmf_wowl_board_install(struct brcmf_cfg80211_info *cfg)
+{
+	struct wiphy *wiphy = cfg->wiphy;
+
+	if (!wiphy->wowlan)
+		return;
+	rtnl_lock();
+	if (!wiphy->wowlan_config) {
+		wiphy->wowlan_config = brcmf_wowl_board_config();
+		cfg->wowl.config_lost = !wiphy->wowlan_config;
+	}
+	rtnl_unlock();
+	if (cfg->wowl.config_lost)
+		bphy_err(cfg->pub, "board WoWLAN configuration not installed\n");
+}
+
+/* cfg80211 calls this when the configuration goes from cleared to set or back.
+ * A clear request from userspace (nl80211, RTNL held, wiphy registered, config
+ * already NULL) would make cfg80211 leave the AP on the next suspend, so the
+ * board configuration is put back. wiphy_unregister() also calls this, with
+ * registered == false and the old configuration still attached for cfg80211
+ * to free: nothing is restored then.
+ */
+static void brcmf_cfg80211_set_wakeup(struct wiphy *wiphy, bool enabled)
+{
+	struct brcmf_cfg80211_info *cfg = wiphy_to_cfg(wiphy);
+
+	if (!wiphy->registered)
+		return;
+	if (enabled) {
+		/* userspace installed a configuration after a failed restore */
+		if (wiphy->wowlan_config)
+			cfg->wowl.config_lost = false;
+		return;
+	}
+	if (wiphy->wowlan_config)
+		return;
+	ASSERT_RTNL();
+	wiphy->wowlan_config = brcmf_wowl_board_config();
+	cfg->wowl.config_lost = !wiphy->wowlan_config;
+	cfg->wowl.restore_count++;
+	WARN_ONCE(1, "brcmfmac: WoWLAN configuration cleared by userspace, restored\n");
+}
+
+/* No RTNL and no interface memory: wiphy_unregister() removes this file under
+ * RTNL and drains readers, but interfaces are torn down before that. The MAC
+ * printed is the snapshot taken when the patterns were last programmed (zero
+ * until the first suspend).
+ */
+static int brcmf_wowl_debugfs_read(struct seq_file *s, void *data)
+{
+	struct brcmf_bus *bus_if = dev_get_drvdata(s->private);
+	struct brcmf_cfg80211_info *cfg = bus_if->drvr->config;
+	u8 pat[BRCMF_WOWL_BOARD_PATLEN];
+	u8 mask[DIV_ROUND_UP(BRCMF_WOWL_BOARD_PATLEN, 8)];
+	u32 i, j;
+
+	if (!cfg)
+		return 0;
+	seq_printf(s, "config: %s\n",
+		   READ_ONCE(cfg->wiphy->wowlan_config) ? "set" : "cleared");
+	seq_printf(s, "config_lost: %d\nactive: %d\nwake_count: %u\nrestore_count: %u\n",
+		   cfg->wowl.config_lost, cfg->wowl.active,
+		   cfg->wowl.wake_count, cfg->wowl.restore_count);
+	for (i = 0; i < ARRAY_SIZE(brcmf_wowl_board_patterns); i++) {
+		const struct brcmf_wowl_board_pattern *bp =
+			&brcmf_wowl_board_patterns[i];
+
+		brcmf_wowl_board_build(bp, cfg->wowl.mac, pat, mask);
+		seq_printf(s, "%-12s len %2u mask %*phN pattern ", bp->name,
+			   bp->len, (int)DIV_ROUND_UP(bp->len, 8), mask);
+		for (j = 0; j < bp->len; j++)
+			seq_printf(s, "%02x", pat[j]);
+		seq_putc(s, '\n');
+	}
+	return 0;
+}
+#endif /* CONFIG_PM */
+
 static struct cfg80211_ops brcmf_cfg80211_ops = {
 	.add_virtual_intf = brcmf_cfg80211_add_iface,
 	.del_virtual_intf = brcmf_cfg80211_del_iface,
@@ -5523,6 +5722,9 @@ static struct cfg80211_ops brcmf_cfg80211_ops = {
 	.disconnect = brcmf_cfg80211_disconnect,
 	.suspend = brcmf_cfg80211_suspend,
 	.resume = brcmf_cfg80211_resume,
+#ifdef CONFIG_PM
+	.set_wakeup = brcmf_cfg80211_set_wakeup,
+#endif
 	.set_pmksa = brcmf_cfg80211_set_pmksa,
 	.del_pmksa = brcmf_cfg80211_del_pmksa,
 	.flush_pmksa = brcmf_cfg80211_flush_pmksa,
@@ -7033,12 +7235,12 @@ err:
 }
 
 #ifdef CONFIG_PM
+/* The firmware's bitmap patterns are owned by the board wake table
+ * (brcmf_wowl_board_patterns); none are offered to userspace, so nl80211
+ * rejects pattern requests instead of accepting them and ignoring them.
+ */
 static const struct wiphy_wowlan_support brcmf_wowlan_support = {
 	.flags = WIPHY_WOWLAN_MAGIC_PKT | WIPHY_WOWLAN_DISCONNECT,
-	.n_patterns = BRCMF_WOWL_MAXPATTERNS,
-	.pattern_max_len = BRCMF_WOWL_MAXPATTERNSIZE,
-	.pattern_min_len = 1,
-	.max_pkt_offset = 1500,
 };
 #endif
 
@@ -7583,6 +7785,11 @@ struct brcmf_cfg80211_info *brcmf_cfg80211_attach(struct brcmf_pub *drvr,
 		bphy_err(drvr, "Could not register wiphy device (%d)\n", err);
 		goto priv_out;
 	}
+
+#ifdef CONFIG_PM
+	brcmf_wowl_board_install(cfg);
+	brcmf_debugfs_add_entry(drvr, "wowl", brcmf_wowl_debugfs_read);
+#endif
 
 	err = brcmf_setup_wiphybands(cfg);
 	if (err) {
