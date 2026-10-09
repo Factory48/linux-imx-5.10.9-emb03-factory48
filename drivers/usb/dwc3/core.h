@@ -987,6 +987,22 @@ struct dwc3_platform_data {
 };
 
 /**
+ * enum dwc3_host_sleep - host role, what system suspend did to the core
+ * @DWC3_HOST_SLEEP_NONE: no system suspend in progress
+ * @DWC3_HOST_SLEEP_TORN_DOWN: core torn down (no wakeup); resume re-inits it
+ * @DWC3_HOST_SLEEP_KEPT: core kept, PHYs suspended (wakeup allowed)
+ * @DWC3_HOST_SLEEP_SKIPPED: already runtime suspended (PHYs already put); system
+ *			     resume restores the PHYs, as dwc3_resume() marks the
+ *			     device runtime active
+ */
+enum dwc3_host_sleep {
+	DWC3_HOST_SLEEP_NONE,
+	DWC3_HOST_SLEEP_TORN_DOWN,
+	DWC3_HOST_SLEEP_KEPT,
+	DWC3_HOST_SLEEP_SKIPPED,
+};
+
+/**
  * struct dwc3 - representation of our controller
  * @drd_work: workqueue used for role swapping
  * @ep0_trb: trb which is used for the ctrl_req
@@ -1128,6 +1144,8 @@ struct dwc3_platform_data {
  * @host_vbus_glitches: set to avoid vbus glitch during
  *                      xhci reset.
  * @dis_split_quirk: set to disable split boundary.
+ * @host_sleep: host role, what the last system suspend did to the core (see
+ *		enum dwc3_host_sleep); read and cleared by system resume.
  * @imod_interval: set the interrupt moderation interval in 250ns
  *			increments or 0 to disable.
  * @max_cfg_eps: current max number of IN eps used across all USB configs.
@@ -1342,6 +1360,7 @@ struct dwc3 {
 
 	unsigned		dis_split_quirk:1;
 	unsigned		async_callbacks:1;
+	enum dwc3_host_sleep	host_sleep;
 
 	u16			imod_interval;
 
