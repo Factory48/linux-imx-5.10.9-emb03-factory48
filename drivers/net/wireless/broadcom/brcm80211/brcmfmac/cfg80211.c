@@ -3801,30 +3801,55 @@ static void brcmf_report_wowl_wakeind(struct wiphy *wiphy, struct brcmf_if *ifp)
 
 #endif /* CONFIG_PM */
 
+/* How long resume may wait for the bus interface to come back up. */
+#define BRCMF_RESUME_BUS_UP_TIMEOUT	msecs_to_jiffies(1000)
+
+/* Undo brcmf_configure_wowl(); the bus must be up. */
+static void brcmf_wowl_cleanup(struct brcmf_cfg80211_info *cfg,
+			       struct brcmf_if *ifp)
+{
+	brcmf_fil_iovar_int_set(ifp, "wowl_clear", 0);
+	brcmf_config_wowl_pattern(ifp, "clr", NULL, 0, NULL, 0);
+	if (!brcmf_feat_is_enabled(ifp, BRCMF_FEAT_WOWL_ARP_ND))
+		brcmf_configure_arp_nd_offload(ifp, true);
+	brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_PM, cfg->wowl.pre_pmmode);
+	cfg->wowl.active = false;
+	if (cfg->wowl.nd_enabled) {
+		brcmf_cfg80211_sched_scan_stop(cfg->wiphy, ifp->ndev, 0);
+		brcmf_fweh_unregister(cfg->pub, BRCMF_E_PFN_NET_FOUND);
+		brcmf_fweh_register(cfg->pub, BRCMF_E_PFN_NET_FOUND,
+				    brcmf_notify_sched_scan_results);
+		cfg->wowl.nd_enabled = false;
+	}
+}
+
 static s32 brcmf_cfg80211_resume(struct wiphy *wiphy)
 {
 	struct brcmf_cfg80211_info *cfg = wiphy_to_cfg(wiphy);
+	struct brcmf_pub *drvr = cfg->pub;
 	struct net_device *ndev = cfg_to_ndev(cfg);
 	struct brcmf_if *ifp = netdev_priv(ndev);
 
 	brcmf_dbg(TRACE, "Enter\n");
 
 	if (cfg->wowl.active) {
-		brcmf_report_wowl_wakeind(wiphy, ifp);
-		brcmf_fil_iovar_int_set(ifp, "wowl_clear", 0);
-		brcmf_config_wowl_pattern(ifp, "clr", NULL, 0, NULL, 0);
-		if (!brcmf_feat_is_enabled(ifp, BRCMF_FEAT_WOWL_ARP_ND))
-			brcmf_configure_arp_nd_offload(ifp, true);
-		brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_PM,
-				      cfg->wowl.pre_pmmode);
-		cfg->wowl.active = false;
-		if (cfg->wowl.nd_enabled) {
-			brcmf_cfg80211_sched_scan_stop(cfg->wiphy, ifp->ndev, 0);
-			brcmf_fweh_unregister(cfg->pub, BRCMF_E_PFN_NET_FOUND);
-			brcmf_fweh_register(cfg->pub, BRCMF_E_PFN_NET_FOUND,
-					    brcmf_notify_sched_scan_results);
-			cfg->wowl.nd_enabled = false;
+		/* The wiphy is not ordered after the SDIO function that thaws
+		 * the bus: wait until the DPC has moved the bus back to UP
+		 * instead of talking to a bus that is still down.
+		 */
+		if (!wait_event_timeout(drvr->bus_up_wait,
+					drvr->bus_if->state == BRCMF_BUS_UP,
+					BRCMF_RESUME_BUS_UP_TIMEOUT)) {
+			/* keep wowl.active: suspend cleans up next time */
+			bphy_err(drvr, "resume: bus not up, WoWLAN cleanup deferred\n");
+			return 0;
 		}
+		/* bus-specific readiness (SDIO DATA) is published before
+		 * BUS_UP; pairs with smp_wmb() in brcmf_sdiod_change_state()
+		 */
+		smp_rmb();
+		brcmf_report_wowl_wakeind(wiphy, ifp);
+		brcmf_wowl_cleanup(cfg, ifp);
 	}
 	return 0;
 }
@@ -3900,6 +3925,12 @@ static s32 brcmf_cfg80211_suspend(struct wiphy *wiphy,
 	 */
 	if (!check_vif_up(ifp->vif))
 		goto exit;
+
+	/* a resume that timed out waiting for the bus left WoWLAN armed */
+	if (cfg->wowl.active) {
+		brcmf_dbg(INFO, "cleaning up WoWLAN left by previous resume\n");
+		brcmf_wowl_cleanup(cfg, ifp);
+	}
 
 	/* Stop scheduled scan */
 	if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_PNO))
