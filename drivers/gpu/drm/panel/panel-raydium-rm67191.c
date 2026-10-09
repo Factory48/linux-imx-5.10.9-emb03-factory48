@@ -853,6 +853,14 @@ static int rad_panel_probe(struct mipi_dsi_device *dsi)
 	dsi->mode_flags = MIPI_DSI_MODE_VIDEO_HSE |
 			  MIPI_DSI_MODE_VIDEO |
 			  MIPI_DSI_MODE_EOT_PACKET;
+	/*
+	 * The EMB03 factory kernel probes with VIDEO | VIDEO_HSE only (0x11 stored
+	 * in rad_panel_probe); NXP 2.6.0 added EOT_PACKET for its EVK panels. On
+	 * sec-dsim that bit disables EoT packets in HS mode, which the factory
+	 * link never did, so keep the factory flags for this panel.
+	 */
+	if (panel->pdata->emb03)
+		dsi->mode_flags &= ~MIPI_DSI_MODE_EOT_PACKET;
 
 	ret = of_property_read_u32(np, "video-mode", &video_mode);
 	if (!ret) {
