@@ -25,7 +25,7 @@ permissions:
 
 jobs:
   build:
-    name: Build Kernel (5.10.9-emb03-factory48)
+    name: Build Kernel (5.10.9-emb03)
     runs-on: ubuntu-22.04
 
     env:
@@ -38,7 +38,7 @@ jobs:
       LOCALVERSION: ""
       KBUILD_BUILD_USER: Factory48
       KBUILD_BUILD_HOST: factory48-ci
-      KBUILD_BUILD_TIMESTAMP: ""
+      # KBUILD_BUILD_TIMESTAMP is set by the "Set Kernel Build Timestamp" step below (year pinned to 2021)
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_SLOPPINESS: time_macros,file_macro
       CLANG_VERSION: r383902b
@@ -112,6 +112,18 @@ jobs:
         run: |
           ccache -z
 
+      - name: Set Kernel Build Timestamp (year 2021)
+        run: |
+          # Same `date` format the kernel would use on its own (C locale); only the year is pinned. Month/day/time
+          # stay current and the weekday comes from the 2021 calendar, so the string is self-consistent.
+          # Feb 29 does not exist in 2021: use Feb 28 on that one day instead of failing the build.
+          MD="$(date -u +%m-%d)"
+          [ "$MD" = "02-29" ] && MD="02-28"
+          TS="$(LC_ALL=C date -u -d "2021-$MD $(date -u +%H:%M:%S)")"
+          case "$TS" in *" 2021") ;; *) echo "bad timestamp: $TS" >&2; exit 1 ;; esac
+          echo "KBUILD_BUILD_TIMESTAMP=$TS" >> "$GITHUB_ENV"
+          echo "Kernel build timestamp: $TS"
+
       - name: Configure Kernel
         run: |
           mkdir -p build/out
@@ -172,7 +184,7 @@ jobs:
         if: ${{ github.event.inputs.upload_artifacts != 'false' }}
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-5.10.9-emb03-factory48
+          name: kernel-5.10.9-emb03
           path: dist/
           retention-days: 14
 
