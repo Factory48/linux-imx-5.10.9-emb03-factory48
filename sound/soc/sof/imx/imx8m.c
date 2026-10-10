@@ -21,6 +21,7 @@
 #include <linux/firmware/imx/dsp.h>
 
 #include "../ops.h"
+#include "../sof-audio.h"
 #include "imx-common.h"
 
 #define MBOX_OFFSET	0x800000
@@ -47,9 +48,11 @@ static const char *imx8m_dsp_clks_names[IMX8M_DSP_CLK_NUM] =
 	"ipg", "ocram", "core",
 };
 
-#define IMX8M_DAI_CLK_NUM	6
+#define IMX8M_DAI_CLK_NUM	11
 static const char *imx8m_dai_clks_names[IMX8M_DAI_CLK_NUM] =
 {
+	/* SAI1 clocks */
+	"sai1_bus", "sai1_mclk0", "sai1_mclk1", "sai1_mclk2", "sai1_mclk3",
 	/* SAI3 clocks */
 	"sai3_bus", "sai3_mclk0", "sai3_mclk1", "sai3_mclk2", "sai3_mclk3",
 	/* DMA3 clocks */
@@ -379,21 +382,18 @@ static int imx8m_get_bar_index(struct snd_sof_dev *sdev, u32 type)
 	return type;
 }
 
-static void imx8m_ipc_msg_data(struct snd_sof_dev *sdev,
-			       struct snd_pcm_substream *substream,
-			       void *p, size_t sz)
-{
-	sof_mailbox_read(sdev, sdev->dsp_box.offset, p, sz);
-}
-
-static int imx8m_ipc_pcm_params(struct snd_sof_dev *sdev,
-				struct snd_pcm_substream *substream,
-				const struct sof_ipc_pcm_params_reply *reply)
-{
-	return 0;
-}
-
 static struct snd_soc_dai_driver imx8m_dai[] = {
+{
+	.name = "sai1",
+	.playback = {
+		.channels_min = 1,
+		.channels_max = 32,
+	},
+	.capture = {
+		.channels_min = 1,
+		.channels_max = 32,
+	},
+},
 {
 	.name = "sai3",
 	.playback = {
@@ -519,8 +519,8 @@ struct snd_sof_dsp_ops sof_imx8m_ops = {
 	.get_mailbox_offset	= imx8m_get_mailbox_offset,
 	.get_window_offset	= imx8m_get_window_offset,
 
-	.ipc_msg_data	= imx8m_ipc_msg_data,
-	.ipc_pcm_params	= imx8m_ipc_pcm_params,
+	.ipc_msg_data	= sof_ipc_msg_data,
+	.ipc_pcm_params	= sof_ipc_pcm_params,
 
 	/* module loading */
 	.load_module	= snd_sof_parse_module_memcpy,
@@ -531,6 +531,9 @@ struct snd_sof_dsp_ops sof_imx8m_ops = {
 	/* Debug information */
 	.dbg_dump = imx8_dump,
 
+	/* stream callbacks */
+	.pcm_open	= sof_stream_pcm_open,
+	.pcm_close	= sof_stream_pcm_close,
 	/* Firmware ops */
 	.arch_ops = &sof_xtensa_arch_ops,
 

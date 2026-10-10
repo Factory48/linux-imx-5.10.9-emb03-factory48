@@ -84,7 +84,5 @@ source "sound/soc/codecs/Kconfig"
 # generic frame-work
 source "sound/soc/generic/Kconfig"
 
-source "sound/soc/emb03/Kconfig"
-
 endif	# SND_SOC
 

@@ -110,6 +110,7 @@ enum enetc_bdr_type {TX, RX};
 /* RX BDR reg offsets */
 #define ENETC_RBMR	0
 #define ENETC_RBMR_BDS	BIT(2)
+#define ENETC_RBMR_CM	BIT(4)
 #define ENETC_RBMR_VTE	BIT(5)
 #define ENETC_RBMR_EN	BIT(31)
 #define ENETC_RBSR	0x4
@@ -173,12 +174,16 @@ enum enetc_bdr_type {TX, RX};
 #define ENETC_PSIPMAR0(n)	(0x0100 + (n) * 0x8) /* n = SI index */
 #define ENETC_PSIPMAR1(n)	(0x0104 + (n) * 0x8)
 #define ENETC_PVCLCTR		0x0208
+#define ENETC_PCVLANR1		0x0210
+#define ENETC_PCVLANR2		0x0214
 #define ENETC_VLAN_TYPE_C	BIT(0)
 #define ENETC_VLAN_TYPE_S	BIT(1)
 #define ENETC_PVCLCTR_OVTPIDL(bmp)	((bmp) & 0xff) /* VLAN_TYPE */
 #define ENETC_PSIVLANR(n)	(0x0240 + (n) * 4) /* n = SI index */
 #define ENETC_PSIVLAN_EN	BIT(31)
 #define ENETC_PSIVLAN_SET_QOS(val)	((u32)(val) << 12)
+#define ENETC_PPAUONTR		0x0410
+#define ENETC_PPAUOFFTR		0x0414
 #define ENETC_PTXMBAR		0x0608
 #define ENETC_PCAPR0		0x0900
 #define ENETC_PCAPR0_RXBDR(val)	((val) >> 24)
@@ -197,6 +202,8 @@ enum enetc_bdr_type {TX, RX};
 #define ENETC_CBS_BW_MASK	GENMASK(6, 0)
 #define ENETC_PTCCBSR1(n)	(0x1114 + (n) * 8) /* n = 0 to 7*/
 #define ENETC_RSSHASH_KEY_SIZE	40
+#define ENETC_PRSSCAPR		0x1404
+#define ENETC_PRSSCAPR_GET_NUM_RSS(val)	(BIT((val) & 0xf) * 32)
 #define ENETC_PRSSK(n)		(0x1410 + (n) * 4) /* n = [0..9] */
 #define ENETC_PSIVLANFMR	0x1700
 #define ENETC_PSIVLANFMR_VS	BIT(0)
@@ -224,6 +231,7 @@ enum enetc_bdr_type {TX, RX};
 #define ENETC_PM0_TX_EN		BIT(0)
 #define ENETC_PM0_RX_EN		BIT(1)
 #define ENETC_PM0_PROMISC	BIT(4)
+#define ENETC_PM0_PAUSE_IGN	BIT(8)
 #define ENETC_PM0_CMD_XGLP	BIT(10)
 #define ENETC_PM0_CMD_TXP	BIT(11)
 #define ENETC_PM0_CMD_PHY_TX_EN	BIT(15)
@@ -236,12 +244,23 @@ enum enetc_bdr_type {TX, RX};
 
 #define ENETC_PM_IMDIO_BASE	0x8030
 
+#define ENETC_PM0_PAUSE_QUANTA	0x8054
+#define ENETC_PM0_PAUSE_THRESH	0x8064
+#define ENETC_PM1_PAUSE_QUANTA	0x9054
+#define ENETC_PM1_PAUSE_THRESH	0x9064
+
 #define ENETC_PM0_IF_MODE	0x8300
-#define ENETC_PM1_IF_MODE       0x9300
-#define ENETC_PMO_IFM_RG	BIT(2)
+#define ENETC_PM0_IFM_RG	BIT(2)
 #define ENETC_PM0_IFM_RLP	(BIT(5) | BIT(11))
-#define ENETC_PM0_IFM_RGAUTO	(BIT(15) | ENETC_PMO_IFM_RG | BIT(1))
-#define ENETC_PM0_IFM_XGMII	BIT(12)
+#define ENETC_PM0_IFM_EN_AUTO	BIT(15)
+#define ENETC_PM0_IFM_SSP_MASK	GENMASK(14, 13)
+#define ENETC_PM0_IFM_SSP_1000	(2 << 13)
+#define ENETC_PM0_IFM_SSP_100	(0 << 13)
+#define ENETC_PM0_IFM_SSP_10	(1 << 13)
+#define ENETC_PM0_IFM_FULL_DPX	BIT(12)
+#define ENETC_PM0_IFM_IFMODE_MASK GENMASK(1, 0)
+#define ENETC_PM0_IFM_IFMODE_XGMII 0
+#define ENETC_PM0_IFM_IFMODE_GMII 2
 #define ENETC_PSIDCAPR		0x1b08
 #define ENETC_PSIDCAPR_MSK	GENMASK(15, 0)
 #define ENETC_PSFCAPR		0x1b18
@@ -464,6 +483,8 @@ static inline u64 _enetc_rd_reg64_wa(void __iomem *reg)
 #define enetc_wr_reg(reg, val)		_enetc_wr_reg_wa((reg), (val))
 #define enetc_rd(hw, off)		enetc_rd_reg((hw)->reg + (off))
 #define enetc_wr(hw, off, val)		enetc_wr_reg((hw)->reg + (off), val)
+#define enetc_rd_hot(hw, off)		enetc_rd_reg_hot((hw)->reg + (off))
+#define enetc_wr_hot(hw, off, val)	enetc_wr_reg_hot((hw)->reg + (off), val)
 #define enetc_rd64(hw, off)		_enetc_rd_reg64_wa((hw)->reg + (off))
 /* port register accessors - PF only */
 #define enetc_port_rd(hw, off)		enetc_rd_reg((hw)->port + (off))
@@ -588,6 +609,7 @@ union enetc_rx_bd {
 #define ENETC_RXBD_LSTATUS(flags)	((flags) << 16)
 #define ENETC_RXBD_FLAG_VLAN	BIT(9)
 #define ENETC_RXBD_FLAG_TSTMP	BIT(10)
+#define ENETC_RXBD_FLAG_TPID	GENMASK(1, 0)
 
 #define ENETC_MAC_ADDR_FILT_CNT	8 /* # of supported entries per port */
 #define EMETC_MAC_ADDR_FILT_RES	3 /* # of reserved entries at the beginning */
@@ -601,10 +623,10 @@ struct enetc_cmd_rfse {
 	u8 smac_m[6];
 	u8 dmac_h[6];
 	u8 dmac_m[6];
-	u32 sip_h[4];
-	u32 sip_m[4];
-	u32 dip_h[4];
-	u32 dip_m[4];
+	__be32 sip_h[4];
+	__be32 sip_m[4];
+	__be32 dip_h[4];
+	__be32 dip_m[4];
 	u16 ethtype_h;
 	u16 ethtype_m;
 	u16 ethtype4_h;

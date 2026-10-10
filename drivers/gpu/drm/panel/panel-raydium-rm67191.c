@@ -7,8 +7,6 @@
 
 #include <linux/backlight.h>
 #include <linux/delay.h>
-#include <linux/emb03-panel.h>
-#include <linux/mutex.h>
 #include <linux/gpio/consumer.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -105,7 +103,7 @@ static const struct cmd_set_entry mcs_rm67199[] = {
 	{0x45, 0x02}, {0x46, 0x00}, {0x47, 0x00}, {0x48, 0x06},
 	{0x49, 0x02}, {0x4A, 0x8A}, {0x4B, 0x00}, {0x5F, 0xCA},
 	{0x60, 0x01}, {0x61, 0xE8}, {0x62, 0x09}, {0x63, 0x00},
-	{0x64, 0x07}, {0x65, 0x00}, {0x66, 0x30}, {0x67, 0x00},
+	{0x64, 0x07}, {0x65, 0x00}, {0x66, 0x30}, {0x67, 0x80},
 	{0x9B, 0x03}, {0xA9, 0x07}, {0xAA, 0x06}, {0xAB, 0x02},
 	{0xAC, 0x10}, {0xAD, 0x11}, {0xAE, 0x05}, {0xAF, 0x04},
 	{0xB0, 0x10}, {0xB1, 0x10}, {0xB2, 0x10}, {0xB3, 0x10},
@@ -129,10 +127,7 @@ struct rad_panel {
 	struct mipi_dsi_device *dsi;
 
 	struct gpio_desc *reset;
-	struct gpio_desc *pwd;
 	struct backlight_device *backlight;
-	struct backlight_device *external_backlight;
-	bool backlight_delay_done;
 
 	struct regulator_bulk_data *supplies;
 	unsigned int num_supplies;
@@ -145,85 +140,7 @@ struct rad_panel {
 
 struct rad_platform_data {
 	int (*enable)(struct rad_panel *panel);
-	const struct drm_display_mode *mode;
-	bool emb03;
 };
-
-/* Single EMB03 panel provider. Lock order: state_lock -> touch lifecycle.
- * No touch worker takes state_lock or enters DRM. Holding this mutex across
- * OFF callbacks guarantees bus/IRQ drain precedes panel power/reset changes.
- */
-static DEFINE_MUTEX(emb03_state_lock);
-static struct rad_panel *emb03_owner;
-static struct emb03_panel_listener *emb03_listener;
-static bool emb03_ready;
-
-int emb03_panel_register_listener(struct emb03_panel_listener *listener)
-{
-	int ret = 0;
-
-	if (!listener || !listener->notify)
-		return -EINVAL;
-	mutex_lock(&emb03_state_lock);
-	if (emb03_listener) {
-		ret = -EBUSY;
-	} else {
-		emb03_listener = listener;
-		listener->notify(listener, emb03_ready);
-	}
-	mutex_unlock(&emb03_state_lock);
-	return ret;
-}
-EXPORT_SYMBOL_GPL(emb03_panel_register_listener);
-
-void emb03_panel_unregister_listener(struct emb03_panel_listener *listener)
-{
-	mutex_lock(&emb03_state_lock);
-	if (emb03_listener == listener)
-		emb03_listener = NULL;
-	mutex_unlock(&emb03_state_lock);
-}
-EXPORT_SYMBOL_GPL(emb03_panel_unregister_listener);
-
-static void emb03_panel_state(struct rad_panel *rad, bool ready)
-{
-	if (!rad->pdata->emb03)
-		return;
-	mutex_lock(&emb03_state_lock);
-	if (emb03_owner == rad && emb03_ready != ready) {
-		emb03_ready = ready;
-		if (emb03_listener)
-			emb03_listener->notify(emb03_listener, ready);
-	}
-	mutex_unlock(&emb03_state_lock);
-}
-
-static void emb03_panel_release(void *data)
-{
-	struct rad_panel *rad = data;
-
-	mutex_lock(&emb03_state_lock);
-	if (emb03_owner == rad) {
-		emb03_ready = false;
-		if (emb03_listener)
-			emb03_listener->notify(emb03_listener, false);
-		emb03_owner = NULL;
-	}
-	mutex_unlock(&emb03_state_lock);
-}
-
-static int emb03_panel_claim(struct rad_panel *rad)
-{
-	int ret = 0;
-
-	mutex_lock(&emb03_state_lock);
-	if (emb03_owner)
-		ret = -EBUSY;
-	else
-		emb03_owner = rad;
-	mutex_unlock(&emb03_state_lock);
-	return ret;
-}
 
 static const struct drm_display_mode default_mode = {
 	.clock = 121000,
@@ -239,28 +156,6 @@ static const struct drm_display_mode default_mode = {
 	.height_mm = 121,
 	.flags = DRM_MODE_FLAG_NHSYNC |
 		 DRM_MODE_FLAG_NVSYNC,
-};
-
-/*
- * EMB03 1.2.2 board variant, reconstructed from the hash-pinned kernel.
- * rad_panel_get_modes -> default_mode at 0xffff800011a0c6d8.
- * See evidence/panel-port-final.md for provenance and lifecycle differences.
- * The state dump's 0x48 is mode TYPE, not sync flags (flags are zero).
- * Opt in with factory48,emb03-rm67191 (or legacy polyhex,emb03-rm67191); generic panels stay unchanged.
- */
-static const struct drm_display_mode emb03_mode = {
-	.clock = 80290,
-	.hdisplay = 720,
-	.hsync_start = 780,
-	.hsync_end = 920,
-	.htotal = 928,
-	.vdisplay = 1280,
-	.vsync_start = 1430,
-	.vsync_end = 1432,
-	.vtotal = 1442,
-	.width_mm = 68,
-	.height_mm = 121,
-	.flags = 0,
 };
 
 static inline struct rad_panel *to_rad_panel(struct drm_panel *panel)
@@ -310,7 +205,6 @@ static int rad_panel_prepare(struct drm_panel *panel)
 	if (rad->prepared)
 		return 0;
 
-	emb03_panel_state(rad, false);
 	ret = regulator_bulk_enable(rad->num_supplies, rad->supplies);
 	if (ret)
 		return ret;
@@ -337,7 +231,6 @@ static int rad_panel_unprepare(struct drm_panel *panel)
 	struct rad_panel *rad = to_rad_panel(panel);
 	int ret;
 
-	emb03_panel_state(rad, false);
 	if (!rad->prepared)
 		return 0;
 
@@ -357,87 +250,8 @@ static int rad_panel_unprepare(struct drm_panel *panel)
 		return ret;
 
 	rad->prepared = false;
-	if (rad->pdata->emb03)
-		gpiod_set_value_cansleep(rad->pwd, 0);
 
 	return 0;
-}
-
-/* Exact 1.2.2 DCS buffers, NOT the 0.1.6 table. Length includes opcode. */
-struct emb03_dcs_cmd {
-	u8 len;
-	u8 data[31];
-};
-
-static const struct emb03_dcs_cmd emb03_dcs[] = {
-	{ 10, { 0xbb, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5a, 0xa5, 0x0f } },
-	{ 31, { 0xc1, 0x53, 0xe0, 0x02, 0x02, 0x71, 0x05, 0x22, 0x80, 0x00, 0x30, 0x00, 0x00, 0x40, 0x03, 0xff, 0xff, 0x01, 0x03, 0x00, 0x55, 0x4f, 0x52, 0x04, 0x15, 0x08, 0x50, 0x10, 0x10, 0x00, 0x00 } },
-	{ 10, { 0xc8, 0x03, 0x14, 0x14, 0x18, 0x72, 0x18, 0x72, 0x00, 0x00 } },
-	{ 3, { 0xc4, 0x9d, 0x00 } },
-	{ 11, { 0xc9, 0x1a, 0x03, 0x3e, 0x60, 0x12, 0xee, 0x44, 0x66, 0x88, 0x80 } },
-	{ 17, { 0xcd, 0x8a, 0x20, 0x02, 0x02, 0x11, 0x30, 0x80, 0x08, 0xf5, 0x08, 0x00, 0x01, 0x01, 0x01, 0x01, 0xaa } },
-	{ 21, { 0xce, 0x80, 0x00, 0xff, 0xb6, 0x00, 0x04, 0x00, 0x04, 0x08, 0x08, 0x00, 0x04, 0x38, 0xd0, 0x42, 0x80, 0x00, 0x75, 0x00, 0x00 } },
-	{ 14, { 0xcf, 0x00, 0x00, 0x35, 0x1f, 0xad, 0x05, 0x05, 0x00, 0x30, 0x10, 0x48, 0xa0, 0x41 } },
-	{ 13, { 0xd0, 0x10, 0x00, 0x44, 0x72, 0x74, 0xa6, 0x52, 0xb2, 0x40, 0x04, 0x71, 0x00 } },
-	{ 30, { 0xd3, 0x00, 0x04, 0x08, 0x0c, 0x0d, 0x10, 0x13, 0x11, 0x47, 0x47, 0x4d, 0x52, 0x58, 0x61, 0x6d, 0x7f, 0x20, 0x32, 0x41, 0x40, 0x48, 0x58, 0x5b, 0x5e, 0x6a, 0x6c, 0x68, 0x7a, 0x8c } },
-	{ 30, { 0xd4, 0x00, 0x04, 0x08, 0x0c, 0x0d, 0x10, 0x13, 0x11, 0x47, 0x47, 0x4d, 0x52, 0x58, 0x61, 0x6d, 0x7f, 0x20, 0x32, 0x41, 0x40, 0x48, 0x58, 0x5b, 0x5e, 0x6a, 0x6c, 0x68, 0x7a, 0x8c } },
-	{ 31, { 0xd5, 0x60, 0x40, 0x00, 0x00, 0x44, 0x44, 0x08, 0x07, 0x00, 0x08, 0x07, 0x00, 0x30, 0x00, 0xd5, 0x1f, 0x03, 0x03, 0x03, 0x03, 0x00, 0x03, 0x03, 0x00, 0x84, 0xa7, 0x00, 0x60, 0x40, 0x01 } },
-	{ 27, { 0xd6, 0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x07, 0x07, 0x00, 0x09, 0x51, 0x05, 0x03, 0x03, 0x03, 0x03, 0x03, 0x30, 0x02, 0x01 } },
-	{ 23, { 0xd7, 0x1f, 0x1f, 0x1f, 0x08, 0x0a, 0x0c, 0x0e, 0x1f, 0x1e, 0x1e, 0x00, 0x02, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f } },
-	{ 23, { 0xd8, 0x1f, 0x1f, 0x1f, 0x09, 0x0b, 0x0d, 0x0f, 0x1f, 0x1e, 0x1e, 0x01, 0x03, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f } },
-	{ 23, { 0xd9, 0x1f, 0x1f, 0x1e, 0x0f, 0x0d, 0x0b, 0x09, 0x1f, 0x1e, 0x1f, 0x03, 0x01, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f } },
-	{ 23, { 0xdd, 0x1f, 0x1f, 0x1e, 0x0e, 0x0c, 0x0a, 0x08, 0x1f, 0x1e, 0x1f, 0x02, 0x00, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f, 0x1f } },
-};
-
-static int emb03_enable(struct rad_panel *rad)
-{
-	struct mipi_dsi_device *dsi = rad->dsi;
-	int ret;
-	size_t i;
-
-	if (rad->enabled)
-		return 0;
-	if (!rad->prepared)
-		return -EPERM;
-
-	gpiod_set_value_cansleep(rad->pwd, 1);
-	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
-	ret = mipi_dsi_dcs_set_pixel_format(dsi,
-			color_format_from_dsi_format(dsi->format));
-	if (ret < 0)
-		goto fail;
-	ret = mipi_dsi_dcs_exit_sleep_mode(dsi);
-	if (ret < 0)
-		goto fail;
-	msleep(10);
-	for (i = 0; i < ARRAY_SIZE(emb03_dcs); i++) {
-		ret = mipi_dsi_dcs_write_buffer(dsi, emb03_dcs[i].data,
-					      emb03_dcs[i].len);
-		if (ret < 0)
-			goto fail;
-		/* SEC DSI returns packet size (payload + 4), not tx_len. */
-	}
-	ret = mipi_dsi_dcs_set_display_on(dsi);
-	if (ret < 0)
-		goto fail;
-	ret = backlight_enable(rad->backlight);
-	if (ret < 0)
-		goto fail;
-	ret = backlight_enable(rad->external_backlight);
-	if (ret < 0)
-		goto fail;
-	rad->enabled = true;
-	emb03_panel_state(rad, true);
-	return 0;
-
-fail:
-	emb03_panel_state(rad, false);
-	dev_err(&dsi->dev, "EMB03 enable failed: %d\n", ret);
-	backlight_disable(rad->backlight);
-	backlight_disable(rad->external_backlight);
-	gpiod_set_value_cansleep(rad->reset, 1);
-	/* Leave supplies/pwd for the normal unprepare path, as in 1.2.2. */
-	return ret;
 }
 
 static int rm67191_enable(struct rad_panel *panel)
@@ -552,7 +366,7 @@ static int rm67199_enable(struct rad_panel *panel)
 		goto fail;
 
 	/* Set DSI mode */
-	ret = mipi_dsi_generic_write(dsi, (u8[]){ 0xC2, 0x08 }, 2);
+	ret = mipi_dsi_generic_write(dsi, (u8[]){ 0xC2, 0x0B }, 2);
 	if (ret < 0) {
 		dev_err(dev, "Failed to set DSI mode (%d)\n", ret);
 		goto fail;
@@ -629,19 +443,13 @@ static int rad_panel_disable(struct drm_panel *panel)
 	struct device *dev = &dsi->dev;
 	int ret;
 
-	emb03_panel_state(rad, false);
 	if (!rad->enabled)
 		return 0;
 
 	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
 
 	backlight_disable(rad->backlight);
-	if (rad->pdata->emb03)
-		backlight_disable(rad->external_backlight);
 
-	/* Backlight callbacks use HS; send the shutdown DCS in LP mode. */
-	if (rad->pdata->emb03)
-		dsi->mode_flags |= MIPI_DSI_MODE_LPM;
 	usleep_range(10000, 12000);
 
 	ret = mipi_dsi_dcs_set_display_off(dsi);
@@ -666,15 +474,13 @@ static int rad_panel_disable(struct drm_panel *panel)
 static int rad_panel_get_modes(struct drm_panel *panel,
 			       struct drm_connector *connector)
 {
-	struct rad_panel *rad = to_rad_panel(panel);
-	const struct drm_display_mode *native = rad->pdata->mode;
 	struct drm_display_mode *mode;
 
-	mode = drm_mode_duplicate(connector->dev, native);
+	mode = drm_mode_duplicate(connector->dev, &default_mode);
 	if (!mode) {
 		dev_err(panel->dev, "failed to add mode %ux%u@%u\n",
-			native->hdisplay, native->vdisplay,
-			drm_mode_vrefresh(native));
+			default_mode.hdisplay, default_mode.vdisplay,
+			drm_mode_vrefresh(&default_mode));
 		return -ENOMEM;
 	}
 
@@ -728,21 +534,6 @@ static int rad_bl_update_status(struct backlight_device *bl)
 	if (ret < 0)
 		return ret;
 
-	if (rad->external_backlight) {
-		/* 1.2.2 used a global one-shot; keep the 1s delay per device. */
-		if (!rad->backlight_delay_done) {
-			rad->backlight_delay_done = true;
-			msleep(1000);
-		}
-		/* Do not undo blanking while disable is invoking this callback. */
-		rad->external_backlight->props.power = bl->props.power;
-		rad->external_backlight->props.fb_blank = bl->props.fb_blank;
-		rad->external_backlight->props.state = bl->props.state;
-		rad->external_backlight->props.brightness =
-			min(bl->props.brightness,
-			    rad->external_backlight->props.max_brightness);
-		return backlight_update_status(rad->external_backlight);
-	}
 	return 0;
 }
 
@@ -783,35 +574,18 @@ static int rad_init_regulators(struct rad_panel *rad)
 
 static const struct rad_platform_data rad_rm67191 = {
 	.enable = &rm67191_enable,
-	.mode = &default_mode,
 };
 
 static const struct rad_platform_data rad_rm67199 = {
 	.enable = &rm67199_enable,
-	.mode = &default_mode,
-};
-
-static const struct rad_platform_data rad_emb03 = {
-	.enable = &emb03_enable,
-	.mode = &emb03_mode,
-	.emb03 = true,
 };
 
 static const struct of_device_id rad_of_match[] = {
-	{ .compatible = "factory48,emb03-rm67191", .data = &rad_emb03 },
-	{ .compatible = "polyhex,emb03-rm67191", .data = &rad_emb03 },
 	{ .compatible = "raydium,rm67191", .data = &rad_rm67191 },
 	{ .compatible = "raydium,rm67199", .data = &rad_rm67199 },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, rad_of_match);
-
-static void emb03_pwd_off(void *data)
-{
-	struct rad_panel *rad = data;
-
-	gpiod_set_value_cansleep(rad->pwd, 0);
-}
 
 static int rad_panel_probe(struct mipi_dsi_device *dsi)
 {
@@ -835,22 +609,10 @@ static int rad_panel_probe(struct mipi_dsi_device *dsi)
 	panel->dsi = dsi;
 	panel->pdata = of_id->data;
 
-	if (panel->pdata->emb03) {
-		/* Claim before any GPIO changes; a second provider must fail closed. */
-		ret = emb03_panel_claim(panel);
-		if (ret)
-			return ret;
-		ret = devm_add_action_or_reset(dev, emb03_panel_release, panel);
-		if (ret)
-			return ret;
-		/* Managed reference and deferred probe, unlike vendor's raw lookup. */
-		panel->external_backlight = devm_of_find_backlight(dev);
-		if (IS_ERR(panel->external_backlight))
-			return PTR_ERR(panel->external_backlight);
-	}
-
 	dsi->format = MIPI_DSI_FMT_RGB888;
-	dsi->mode_flags =  MIPI_DSI_MODE_VIDEO_HSE | MIPI_DSI_MODE_VIDEO;
+	dsi->mode_flags = MIPI_DSI_MODE_VIDEO_HSE |
+			  MIPI_DSI_MODE_VIDEO |
+			  MIPI_DSI_MODE_EOT_PACKET;
 
 	ret = of_property_read_u32(np, "video-mode", &video_mode);
 	if (!ret) {
@@ -876,18 +638,6 @@ static int rad_panel_probe(struct mipi_dsi_device *dsi)
 	if (ret) {
 		dev_err(dev, "Failed to get dsi-lanes property (%d)\n", ret);
 		return ret;
-	}
-
-	if (panel->pdata->emb03) {
-		/* Vendor probe flags 0x17: OUT_HIGH | NONEXCLUSIVE. */
-		panel->pwd = devm_gpiod_get_optional(dev, "pwd",
-				GPIOD_OUT_HIGH | GPIOD_FLAGS_BIT_NONEXCLUSIVE);
-		if (IS_ERR(panel->pwd))
-			return PTR_ERR(panel->pwd);
-		gpiod_set_value_cansleep(panel->pwd, 1);
-		ret = devm_add_action_or_reset(dev, emb03_pwd_off, panel);
-		if (ret)
-			return ret;
 	}
 
 	panel->reset = devm_gpiod_get_optional(dev, "reset",
@@ -937,17 +687,6 @@ static int rad_panel_remove(struct mipi_dsi_device *dsi)
 	struct device *dev = &dsi->dev;
 	int ret;
 
-	/* Quiesce before detach so DCS transfers still have a host. */
-	if (rad->pdata->emb03) {
-		ret = rad_panel_disable(&rad->panel);
-		if (ret)
-			dev_warn(dev, "EMB03 disable on remove: %d\n", ret);
-		ret = rad_panel_unprepare(&rad->panel);
-		if (ret)
-			dev_warn(dev, "EMB03 unprepare on remove: %d\n", ret);
-		gpiod_set_value_cansleep(rad->pwd, 0);
-	}
-
 	ret = mipi_dsi_detach(dsi);
 	if (ret)
 		dev_err(dev, "Failed to detach from host (%d)\n", ret);
@@ -963,8 +702,6 @@ static void rad_panel_shutdown(struct mipi_dsi_device *dsi)
 
 	rad_panel_disable(&rad->panel);
 	rad_panel_unprepare(&rad->panel);
-	if (rad->pdata->emb03)
-		gpiod_set_value_cansleep(rad->pwd, 0);
 }
 
 static struct mipi_dsi_driver rad_panel_driver = {

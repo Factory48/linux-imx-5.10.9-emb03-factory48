@@ -230,31 +230,31 @@ static void dpaa2_eth_free_bufs(struct dpaa2_eth_priv *priv, u64 *buf_array,
 	}
 }
 
-static void dpaa2_eth_xdp_release_buf(struct dpaa2_eth_priv *priv,
-				      struct dpaa2_eth_channel *ch,
-				      dma_addr_t addr)
+static void dpaa2_eth_recycle_buf(struct dpaa2_eth_priv *priv,
+				  struct dpaa2_eth_channel *ch,
+				  dma_addr_t addr)
 {
 	int retries = 0;
 	int err;
 
-	ch->xdp.drop_bufs[ch->xdp.drop_cnt++] = addr;
-	if (ch->xdp.drop_cnt < DPAA2_ETH_BUFS_PER_CMD)
+	ch->recycled_bufs[ch->recycled_bufs_cnt++] = addr;
+	if (ch->recycled_bufs_cnt < DPAA2_ETH_BUFS_PER_CMD)
 		return;
 
 	while ((err = dpaa2_io_service_release(ch->dpio, priv->bpid,
-					       ch->xdp.drop_bufs,
-					       ch->xdp.drop_cnt)) == -EBUSY) {
+					       ch->recycled_bufs,
+					       ch->recycled_bufs_cnt)) == -EBUSY) {
 		if (retries++ >= DPAA2_ETH_SWP_BUSY_RETRIES)
 			break;
 		cpu_relax();
 	}
 
 	if (err) {
-		dpaa2_eth_free_bufs(priv, ch->xdp.drop_bufs, ch->xdp.drop_cnt);
-		ch->buf_count -= ch->xdp.drop_cnt;
+		dpaa2_eth_free_bufs(priv, ch->recycled_bufs, ch->recycled_bufs_cnt);
+		ch->buf_count -= ch->recycled_bufs_cnt;
 	}
 
-	ch->xdp.drop_cnt = 0;
+	ch->recycled_bufs_cnt = 0;
 }
 
 static int dpaa2_eth_xdp_flush(struct dpaa2_eth_priv *priv,
@@ -307,7 +307,7 @@ static void dpaa2_eth_xdp_tx_flush(struct dpaa2_eth_priv *priv,
 		ch->stats.xdp_tx++;
 	}
 	for (i = enqueued; i < fq->xdp_tx_fds.num; i++) {
-		dpaa2_eth_xdp_release_buf(priv, ch, dpaa2_fd_get_addr(&fds[i]));
+		dpaa2_eth_recycle_buf(priv, ch, dpaa2_fd_get_addr(&fds[i]));
 		percpu_stats->tx_errors++;
 		ch->stats.xdp_tx_err++;
 	}
@@ -393,7 +393,7 @@ static u32 dpaa2_eth_run_xdp(struct dpaa2_eth_priv *priv,
 		trace_xdp_exception(priv->net_dev, xdp_prog, xdp_act);
 		fallthrough;
 	case XDP_DROP:
-		dpaa2_eth_xdp_release_buf(priv, ch, addr);
+		dpaa2_eth_recycle_buf(priv, ch, addr);
 		ch->stats.xdp_drop++;
 		break;
 	case XDP_REDIRECT:
@@ -406,10 +406,20 @@ static u32 dpaa2_eth_run_xdp(struct dpaa2_eth_priv *priv,
 		xdp.frame_sz = DPAA2_ETH_RX_BUF_RAW_SIZE;
 
 		err = xdp_do_redirect(priv->net_dev, &xdp, xdp_prog);
-		if (unlikely(err))
+		if (unlikely(err)) {
+			addr = dma_map_page(priv->net_dev->dev.parent,
+					    virt_to_page(vaddr), 0,
+					    priv->rx_buf_size, DMA_BIDIRECTIONAL);
+			if (unlikely(dma_mapping_error(priv->net_dev->dev.parent, addr))) {
+				free_pages((unsigned long)vaddr, 0);
+			} else {
+				ch->buf_count++;
+				dpaa2_eth_recycle_buf(priv, ch, addr);
+			}
 			ch->stats.xdp_drop++;
-		else
+		} else {
 			ch->stats.xdp_redirect++;
+		}
 		break;
 	}
 
@@ -427,6 +437,35 @@ static bool frame_is_tcp(const struct dpaa2_fd *fd, struct dpaa2_fas *fas)
 		return false;
 
 	return !!(fapr->faf_hi & DPAA2_FAF_HI_TCP_PRESENT);
+}
+
+static struct sk_buff *dpaa2_eth_copybreak(struct dpaa2_eth_channel *ch,
+					   const struct dpaa2_fd *fd,
+					   void *fd_vaddr)
+{
+	u16 fd_offset = dpaa2_fd_get_offset(fd);
+	struct dpaa2_eth_priv *priv = ch->priv;
+	u32 fd_length = dpaa2_fd_get_len(fd);
+	struct sk_buff *skb = NULL;
+	unsigned int skb_len;
+
+	if (fd_length > priv->rx_copybreak)
+		return NULL;
+
+	skb_len = fd_length + dpaa2_eth_needed_headroom(NULL);
+
+	skb = napi_alloc_skb(&ch->napi, skb_len);
+	if (!skb)
+		return NULL;
+
+	skb_reserve(skb, dpaa2_eth_needed_headroom(NULL));
+	skb_put(skb, fd_length);
+
+	memcpy(skb->data, fd_vaddr + fd_offset, fd_length);
+
+	dpaa2_eth_recycle_buf(priv, ch, dpaa2_fd_get_addr(fd));
+
+	return skb;
 }
 
 /* Main Rx frame processing routine */
@@ -470,9 +509,12 @@ static void dpaa2_eth_rx(struct dpaa2_eth_priv *priv,
 			return;
 		}
 
-		dma_unmap_page(dev, addr, priv->rx_buf_size,
-			       DMA_BIDIRECTIONAL);
-		skb = dpaa2_eth_build_linear_skb(ch, fd, vaddr);
+		skb = dpaa2_eth_copybreak(ch, fd, vaddr);
+		if (!skb) {
+			dma_unmap_page(dev, addr, priv->rx_buf_size,
+				       DMA_BIDIRECTIONAL);
+			skb = dpaa2_eth_build_linear_skb(ch, fd, vaddr);
+		}
 	} else if (fd_format == dpaa2_fd_sg) {
 		WARN_ON(priv->xdp_prog);
 
@@ -1049,6 +1091,12 @@ static void dpaa2_eth_free_tx_fd(struct dpaa2_eth_priv *priv,
 		xdp_return_frame(swa->xdp.xdpf);
 		return;
 	}
+
+	/* If there is no skb (in case of a wrong SWA type)
+	 * just exit the function
+	 */
+	if (!skb)
+		return;
 
 	/* Get the timestamp value */
 	if (skb->cb[0] == TX_TSTAMP) {
@@ -1720,7 +1768,7 @@ static int dpaa2_eth_link_state_update(struct dpaa2_eth_priv *priv)
 	/* When we manage the MAC/PHY using phylink there is no need
 	 * to manually update the netif_carrier.
 	 */
-	if (priv->mac)
+	if (dpaa2_eth_is_type_phy(priv))
 		goto out;
 
 	/* Chech link state; speed / duplex changes are not treated yet */
@@ -1759,7 +1807,7 @@ static int dpaa2_eth_open(struct net_device *net_dev)
 			   priv->dpbp_dev->obj_desc.id, priv->bpid);
 	}
 
-	if (!priv->mac) {
+	if (!dpaa2_eth_is_type_phy(priv)) {
 		/* We'll only start the txqs when the link is actually ready;
 		 * make sure we don't race against the link up notification,
 		 * which may come immediately after dpni_enable();
@@ -1781,7 +1829,7 @@ static int dpaa2_eth_open(struct net_device *net_dev)
 		goto enable_err;
 	}
 
-	if (priv->mac)
+	if (dpaa2_eth_is_type_phy(priv))
 		phylink_start(priv->mac->phylink);
 
 	return 0;
@@ -1855,11 +1903,11 @@ static int dpaa2_eth_stop(struct net_device *net_dev)
 	int dpni_enabled = 0;
 	int retries = 10;
 
-	if (!priv->mac) {
+	if (dpaa2_eth_is_type_phy(priv)) {
+		phylink_stop(priv->mac->phylink);
+	} else {
 		netif_tx_stop_all_queues(net_dev);
 		netif_carrier_off(net_dev);
-	} else {
-		phylink_stop(priv->mac->phylink);
 	}
 
 	/* On dpni_disable(), the MC firmware will:
@@ -2144,7 +2192,7 @@ static int dpaa2_eth_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	if (cmd == SIOCSHWTSTAMP)
 		return dpaa2_eth_ts_ioctl(dev, rq, cmd);
 
-	if (priv->mac)
+	if (dpaa2_eth_is_type_phy(priv))
 		return phylink_mii_ioctl(priv->mac->phylink, rq, cmd);
 
 	return -EOPNOTSUPP;
@@ -4065,25 +4113,9 @@ static int dpaa2_eth_poll_link_state(void *arg)
 	return 0;
 }
 
-static struct device_driver *dpaa2_eth_find_dpmac_driver(void)
-{
-	struct device_driver *drv = NULL;
-	struct klist_iter i;
-
-	klist_iter_init_node(&fsl_mc_bus_type.p->klist_drivers, &i, NULL);
-	while ((drv = next_driver(&i))) {
-		if (strcmp(drv->name, "fsl_dpaa2_mac") == 0)
-			goto exit;
-	}
-
-exit:
-	klist_iter_exit(&i);
-	return drv;
-}
-
 static void dpaa2_eth_dpmac_driver_attach(struct fsl_mc_device *dpmac_dev)
 {
-	struct device_driver *drv = dpaa2_eth_find_dpmac_driver();
+	struct device_driver *drv = driver_find("fsl_dpaa2_mac", &fsl_mc_bus_type);
 	struct device *dev = &dpmac_dev->dev;
 
 	if (dev && dev->driver == NULL && driver_match_device(drv, dev))
@@ -4092,7 +4124,7 @@ static void dpaa2_eth_dpmac_driver_attach(struct fsl_mc_device *dpmac_dev)
 
 static void dpaa2_eth_dpmac_driver_detach(struct fsl_mc_device *dpmac_dev)
 {
-	struct device_driver *drv = dpaa2_eth_find_dpmac_driver();
+	struct device_driver *drv = driver_find("fsl_dpaa2_mac", &fsl_mc_bus_type);
 	struct device *dev = &dpmac_dev->dev;
 
 	if (dev && dev->driver == drv)
@@ -4107,10 +4139,11 @@ static int dpaa2_eth_connect_mac(struct dpaa2_eth_priv *priv)
 
 	dpni_dev = to_fsl_mc_device(priv->net_dev->dev.parent);
 	dpmac_dev = fsl_mc_get_endpoint(dpni_dev);
-	if (IS_ERR_OR_NULL(dpmac_dev) || dpmac_dev->dev.type != &fsl_mc_bus_dpmac_type)
-		return 0;
 
-	if (dpaa2_mac_is_type_fixed(dpmac_dev, priv->mc_io))
+	if (PTR_ERR(dpmac_dev) == -EPROBE_DEFER)
+		return PTR_ERR(dpmac_dev);
+
+	if (IS_ERR(dpmac_dev) || dpmac_dev->dev.type != &fsl_mc_bus_dpmac_type)
 		return 0;
 
 	dpaa2_eth_dpmac_driver_detach(dpmac_dev);
@@ -4123,23 +4156,38 @@ static int dpaa2_eth_connect_mac(struct dpaa2_eth_priv *priv)
 	mac->mc_io = priv->mc_io;
 	mac->net_dev = priv->net_dev;
 
-	err = dpaa2_mac_connect(mac);
-	if (err) {
-		netdev_err(priv->net_dev, "Error connecting to the MAC endpoint\n");
-		kfree(mac);
-		return err;
-	}
+	err = dpaa2_mac_open(mac);
+	if (err)
+		goto err_free_mac;
 	priv->mac = mac;
 
+	if (dpaa2_eth_is_type_phy(priv)) {
+		err = dpaa2_mac_connect(mac);
+		if (err) {
+			netdev_err(priv->net_dev, "Error connecting to the MAC endpoint\n");
+			goto err_close_mac;
+		}
+	}
+
 	return 0;
+
+err_close_mac:
+	dpaa2_mac_close(mac);
+	priv->mac = NULL;
+err_free_mac:
+	kfree(mac);
+	return err;
 }
 
 static void dpaa2_eth_disconnect_mac(struct dpaa2_eth_priv *priv)
 {
-	if (!priv->mac)
+	if (dpaa2_eth_is_type_phy(priv))
+		dpaa2_mac_disconnect(priv->mac);
+
+	if (!dpaa2_eth_has_mac(priv))
 		return;
 
-	dpaa2_mac_disconnect(priv->mac);
+	dpaa2_mac_close(priv->mac);
 	dpaa2_eth_dpmac_driver_attach(priv->mac->mc_dev);
 	kfree(priv->mac);
 	priv->mac = NULL;
@@ -4168,7 +4216,7 @@ static irqreturn_t dpni_irq0_handler_thread(int irq_num, void *arg)
 		dpaa2_eth_set_mac_addr(netdev_priv(net_dev));
 		dpaa2_eth_update_tx_fqids(priv);
 
-		if (priv->mac)
+		if (dpaa2_eth_has_mac(priv))
 			dpaa2_eth_disconnect_mac(priv);
 		else
 			dpaa2_eth_connect_mac(priv);
@@ -4284,6 +4332,8 @@ static int dpaa2_eth_probe(struct fsl_mc_device *dpni_dev)
 
 	skb_queue_head_init(&priv->tx_skbs);
 
+	priv->rx_copybreak = DPAA2_ETH_DEFAULT_COPYBREAK;
+
 	/* Obtain a MC portal */
 	err = fsl_mc_portal_allocate(dpni_dev, FSL_MC_IO_ATOMIC_CONTEXT_PORTAL,
 				     &priv->mc_io);
@@ -4313,6 +4363,30 @@ static int dpaa2_eth_probe(struct fsl_mc_device *dpni_dev)
 	err = dpaa2_eth_bind_dpni(priv);
 	if (err)
 		goto err_bind;
+
+	/* Setting (creating a CGID and assigning it on a frame queue that does
+	 * not have a congestion group associated  or modifying
+	 * an existing CGID on a frame queue to a different CGID) a CGID on a
+	 * frame queue that is in service(has frames in it),
+	 * will cause the byte/frame counter of that CGR to become corrupted.
+	 *
+	 * Below is the detailed solution and the impact if it is not applied
+	 * precisely.
+	 *
+	 * Enable tail drop at probe time to prevent instantaneous counter
+	 * of a congestion group to be 0 while traffic might be in flight on
+	 * the ingress queues. The instantaneous counter will be
+	 * decremented by the number of frames that are dequeued from the ingress
+	 * queue, once the interface is up. Because its value is 0,
+	 * this subtraction yields  an invalid overflow  value.(7FFFFFFFFF)
+	 * The outcome will be greater than
+	 * any configured value for the tail drop threshold, for any queue in the
+	 * group;
+	 * as a consequence, the group will always discard frames and this will
+	 * trigger a situation in which all the frames received on a queue that
+	 * belongs to the congestion group, are discarded continuously.
+	 */
+	dpaa2_eth_set_rx_taildrop(priv, false, priv->pfc_enabled);
 
 	/* Add a NAPI context for each channel */
 	dpaa2_eth_add_ch_napi(priv);
@@ -4461,9 +4535,8 @@ static int dpaa2_eth_remove(struct fsl_mc_device *ls_dev)
 #ifdef CONFIG_DEBUG_FS
 	dpaa2_dbg_remove(priv);
 #endif
-	dpaa2_eth_disconnect_mac(priv);
-
 	unregister_netdev(net_dev);
+	dpaa2_eth_disconnect_mac(priv);
 
 	dpaa2_eth_dl_port_del(priv);
 	dpaa2_eth_dl_traps_unregister(priv);

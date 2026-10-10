@@ -365,7 +365,7 @@ static int ak4458_hw_params(struct snd_pcm_substream *substream,
 	case SNDRV_PCM_FORMAT_DSD_U16_BE:
 	case SNDRV_PCM_FORMAT_DSD_U32_LE:
 	case SNDRV_PCM_FORMAT_DSD_U32_BE:
-		dsd_bclk = nfs1 * params_physical_width(params);
+		dsd_bclk = nfs1 * params_physical_width(params) * ak4458->slots;
 		switch (dsd_bclk) {
 		case 2822400:
 			dsdsel0 = 0;
@@ -616,24 +616,16 @@ static struct snd_soc_dai_driver ak4497_dai = {
 	.ops = &ak4458_dai_ops,
 };
 
-static void ak4458_power_off(struct ak4458_priv *ak4458)
+static void ak4458_reset(struct ak4458_priv *ak4458, bool active)
 {
 	if (ak4458->reset_gpiod) {
-		gpiod_set_value_cansleep(ak4458->reset_gpiod, 0);
+		gpiod_set_value_cansleep(ak4458->reset_gpiod, active);
 		usleep_range(1000, 2000);
 	} else if (!IS_ERR_OR_NULL(ak4458->reset)) {
-		reset_control_assert(ak4458->reset);
-		msleep(5);
-	}
-}
-
-static void ak4458_power_on(struct ak4458_priv *ak4458)
-{
-	if (ak4458->reset_gpiod) {
-		gpiod_set_value_cansleep(ak4458->reset_gpiod, 1);
-		usleep_range(1000, 2000);
-	} else if (!IS_ERR_OR_NULL(ak4458->reset)) {
-		reset_control_deassert(ak4458->reset);
+		if (active)
+			reset_control_assert(ak4458->reset);
+		else
+			reset_control_deassert(ak4458->reset);
 		msleep(5);
 	}
 }
@@ -645,7 +637,7 @@ static int __maybe_unused ak4458_runtime_suspend(struct device *dev)
 
 	regcache_cache_only(ak4458->regmap, true);
 
-	ak4458_power_off(ak4458);
+	ak4458_reset(ak4458, true);
 
 	if (ak4458->mute_gpiod)
 		gpiod_set_value_cansleep(ak4458->mute_gpiod, 0);
@@ -670,7 +662,7 @@ static int __maybe_unused ak4458_runtime_resume(struct device *dev)
 	if (ak4458->mute_gpiod)
 		gpiod_set_value_cansleep(ak4458->mute_gpiod, 1);
 
-	ak4458_power_on(ak4458);
+	ak4458_reset(ak4458, false);
 
 	regcache_cache_only(ak4458->regmap, false);
 	regcache_mark_dirty(ak4458->regmap);
@@ -791,7 +783,7 @@ static int ak4458_i2c_probe(struct i2c_client *i2c)
 	if (ak4458->mute_gpiod)
 		gpiod_set_value_cansleep(ak4458->mute_gpiod, 1);
 
-	ak4458_power_on(ak4458);
+	ak4458_reset(ak4458, false);
 
 	ret = regmap_update_bits(ak4458->regmap, AK4458_00_CONTROL1,
 				 0x80, 0x80);   /* ACKS bit = 1; 10000000 */
@@ -828,7 +820,7 @@ static int ak4458_i2c_probe(struct i2c_client *i2c)
 	regcache_cache_only(ak4458->regmap, true);
 
 err_init:
-	ak4458_power_off(ak4458);
+	ak4458_reset(ak4458, true);
 	regulator_bulk_disable(ARRAY_SIZE(ak4458->supplies), ak4458->supplies);
 
 	return ret;
@@ -846,6 +838,7 @@ static const struct of_device_id ak4458_of_match[] = {
 	{ .compatible = "asahi-kasei,ak4497", .data = &ak4497_drvdata},
 	{ },
 };
+MODULE_DEVICE_TABLE(of, ak4458_of_match);
 
 static struct i2c_driver ak4458_i2c_driver = {
 	.driver = {

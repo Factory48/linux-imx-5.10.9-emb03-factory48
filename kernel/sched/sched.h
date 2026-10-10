@@ -66,6 +66,7 @@
 #include <linux/task_work.h>
 #include <linux/tsacct_kern.h>
 #include <linux/android_vendor.h>
+#include <linux/android_kabi.h>
 
 #include <asm/tlb.h>
 #include <asm-generic/vmlinux.lds.h>
@@ -207,6 +208,13 @@ static inline void update_avg(u64 *avg, u64 sample)
 }
 
 /*
+ * Shifting a value by an exponent greater *or equal* to the size of said value
+ * is UB; cap at size-1.
+ */
+#define shr_bound(val, shift)							\
+	(val >> min_t(typeof(shift), shift, BITS_PER_TYPE(typeof(val)) - 1))
+
+/*
  * !! For sched_setattr_nocheck() (kernel) only !!
  *
  * This is actually gross. :(
@@ -219,6 +227,8 @@ static inline void update_avg(u64 *avg, u64 sample)
  * SUGOV stands for SchedUtil GOVernor.
  */
 #define SCHED_FLAG_SUGOV	0x10000000
+
+#define SCHED_DL_FLAGS (SCHED_FLAG_RECLAIM | SCHED_FLAG_DL_OVERRUN | SCHED_FLAG_SUGOV)
 
 static inline bool dl_entity_is_special(struct sched_dl_entity *dl_se)
 {
@@ -429,6 +439,10 @@ struct task_group {
 	ANDROID_VENDOR_DATA_ARRAY(1, 4);
 #endif
 
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
@@ -601,6 +615,8 @@ struct cfs_rq {
 	int			throttle_count;
 	struct list_head	throttled_list;
 #endif /* CONFIG_CFS_BANDWIDTH */
+
+	ANDROID_VENDOR_DATA_ARRAY(1, 16);
 #endif /* CONFIG_FAIR_GROUP_SCHED */
 };
 
@@ -829,6 +845,11 @@ struct root_domain {
 	struct perf_domain __rcu *pd;
 
 	ANDROID_VENDOR_DATA_ARRAY(1, 4);
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 extern void init_defrootdomain(void);
@@ -840,6 +861,7 @@ extern void sched_put_rd(struct root_domain *rd);
 #ifdef HAVE_RT_PUSH_IPI
 extern void rto_push_irq_work_func(struct irq_work *work);
 #endif
+extern struct task_struct *pick_highest_pushable_task(struct rq *rq, int cpu);
 #endif /* CONFIG_SMP */
 
 #ifdef CONFIG_UCLAMP_TASK
@@ -1025,6 +1047,7 @@ struct rq {
 	call_single_data_t	hrtick_csd;
 #endif
 	struct hrtimer		hrtick_timer;
+	ktime_t 		hrtick_time;
 #endif
 
 #ifdef CONFIG_SCHEDSTATS
@@ -1056,6 +1079,12 @@ struct rq {
 #endif
 
 	ANDROID_VENDOR_DATA_ARRAY(1, 96);
+	ANDROID_OEM_DATA_ARRAY(1, 16);
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
@@ -1731,6 +1760,7 @@ static inline int task_on_rq_migrating(struct task_struct *p)
 #define WF_FORK			0x02		/* Child wakeup after fork */
 #define WF_MIGRATED		0x04		/* Internal use, task got migrated */
 #define WF_ON_CPU		0x08		/* Wakee is on_cpu */
+#define WF_ANDROID_VENDOR	0x1000		/* Vendor specific for Android */
 
 /*
  * To aid in avoiding the subversion of "niceness" due to uneven distribution
@@ -1783,6 +1813,8 @@ extern const u32		sched_prio_to_wmult[40];
 #else
 #define ENQUEUE_MIGRATED	0x00
 #endif
+
+#define ENQUEUE_WAKEUP_SYNC	0x80
 
 #define RETRY_TASK		((void *)-1UL)
 
@@ -1907,6 +1939,7 @@ extern void trigger_load_balance(struct rq *rq);
 
 extern void set_cpus_allowed_common(struct task_struct *p, const struct cpumask *new_mask);
 
+extern unsigned long __read_mostly max_load_balance_interval;
 #endif
 
 #ifdef CONFIG_CPU_IDLE
@@ -2430,20 +2463,27 @@ static __always_inline
 unsigned long uclamp_rq_util_with(struct rq *rq, unsigned long util,
 				  struct task_struct *p)
 {
-	unsigned long min_util;
-	unsigned long max_util;
+	unsigned long min_util = 0;
+	unsigned long max_util = 0;
 
 	if (!static_branch_likely(&sched_uclamp_used))
 		return util;
 
-	min_util = READ_ONCE(rq->uclamp[UCLAMP_MIN].value);
-	max_util = READ_ONCE(rq->uclamp[UCLAMP_MAX].value);
-
 	if (p) {
-		min_util = max(min_util, uclamp_eff_value(p, UCLAMP_MIN));
-		max_util = max(max_util, uclamp_eff_value(p, UCLAMP_MAX));
+		min_util = uclamp_eff_value(p, UCLAMP_MIN);
+		max_util = uclamp_eff_value(p, UCLAMP_MAX);
+
+		/*
+		 * Ignore last runnable task's max clamp, as this task will
+		 * reset it. Similarly, no need to read the rq's min clamp.
+		 */
+		if (rq->uclamp_flags & UCLAMP_FLAG_IDLE)
+			goto out;
 	}
 
+	min_util = max_t(unsigned long, min_util, READ_ONCE(rq->uclamp[UCLAMP_MIN].value));
+	max_util = max_t(unsigned long, max_util, READ_ONCE(rq->uclamp[UCLAMP_MAX].value));
+out:
 	/*
 	 * Since CPU's {min,max}_util clamps are MAX aggregated considering
 	 * RUNNABLE tasks with _different_ clamps, we can end up with an

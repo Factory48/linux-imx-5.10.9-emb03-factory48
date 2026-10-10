@@ -3,10 +3,6 @@
 menu "Bluetooth device drivers"
 	depends on BT
 
-config MACH_IMX_BLUETOOTH_RFKILL
-	bool "EMB03 Bluetooth power control"
-	depends on RFKILL=y && GPIOLIB && OF && PM
-
 config BT_INTEL
 	tristate
 	select REGMAP

@@ -262,7 +262,6 @@ static int vsi_v4l2_sendcmd(
 		if (wait_event_interruptible(ret_queue, getRet(mid, &error, retflag) != 0))
 			return -ERESTARTSYS;
 	}
-
 	return error;
 }
 
@@ -397,9 +396,10 @@ static void format_bufinfo_dec(struct vsi_v4l2_ctx *ctx, struct vsi_v4l2_msg *pm
 		decbufinfo->busInBuf = 0;
 		decbufinfo->inBufSize = 0;
 		decbufinfo->busOutBuf = busaddr[0] + buf->planes[0].data_offset;
-		decbufinfo->OutBufSize = ctx->outbuflen[buf->index];//ctx->mediacfg.sizeimagedst[0];
+		decbufinfo->OutBufSize = buf->planes[0].length - buf->planes[0].data_offset;
 		decbufinfo->bytesused = buf->planes[0].bytesused;
-		if ((ctx->mediacfg.src_pixeldepth == ctx->mediacfg.decparams.dec_info.io_buffer.outputPixelDepth)
+		if (((ctx->mediacfg.src_pixeldepth == ctx->mediacfg.decparams.dec_info.io_buffer.outputPixelDepth)
+			&& ctx->mediacfg.src_pixeldepth != 16)	//p010 can only set by user, not from ctrl sw
 			|| !test_bit(CTX_FLAG_SRCCHANGED_BIT, &ctx->flag))
 			pmsg->params.dec_params.io_buffer.outputPixelDepth = DEFAULT_PIXELDEPTH;
 	} else {
@@ -416,6 +416,7 @@ static void format_bufinfo_dec(struct vsi_v4l2_ctx *ctx, struct vsi_v4l2_msg *pm
 int vsiv4l2_execcmd(struct vsi_v4l2_ctx *ctx, enum v4l2_daemon_cmd_id id, void *args)
 {
 	int ret = 0;
+	u32 param = 0;
 	s32 retflag;
 	struct vsi_v4l2_msg msg;
 
@@ -428,7 +429,8 @@ int vsiv4l2_execcmd(struct vsi_v4l2_ctx *ctx, enum v4l2_daemon_cmd_id id, void *
 	case V4L2_DAEMON_VIDIOC_EXIT:
 		ret = vsi_v4l2_sendcmd(id, 0, 0, NULL, &retflag, 0, 0);
 		break;
-	case V4L2_DAEMON_VIDIOC_STREAMOFF:
+	case V4L2_DAEMON_VIDIOC_DESTROY_ENC:
+	case V4L2_DAEMON_VIDIOC_ENC_RESET:
 		ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
 			ctx->mediacfg.encparams.general.codecFormat, NULL, &retflag, 0, 0);
 		break;
@@ -442,20 +444,30 @@ int vsiv4l2_execcmd(struct vsi_v4l2_ctx *ctx, enum v4l2_daemon_cmd_id id, void *
 		if (ret == 0) {
 			if ((retflag & LAST_BUFFER_FLAG) &&
 				ctx->status == ENC_STATUS_DRAINING)
-				ctx->status = ENC_STATUS_STOPPED;
+				ctx->status = ENC_STATUS_EOS;
 		}
 		break;
 	case V4L2_DAEMON_VIDIOC_STREAMON:
+		if (test_and_clear_bit(CTX_FLAG_ENC_FLUSHBUF, &ctx->flag))
+			param = 1;
 		ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
-			ctx->mediacfg.encparams.general.codecFormat, NULL, &retflag, 0, 0);
+			ctx->mediacfg.encparams.general.codecFormat, NULL, &retflag, 0, param);
 		break;
 	case V4L2_DAEMON_VIDIOC_STREAMOFF_OUTPUT:
-		ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
-			ctx->mediacfg.decparams.dec_info.io_buffer.inputFormat, NULL, &retflag, 0, 0);
+		if (isencoder(ctx))
+			ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
+				ctx->mediacfg.encparams.general.inputFormat, NULL, &retflag, 0, 0);
+		else
+			ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
+				ctx->mediacfg.decparams.dec_info.io_buffer.inputFormat, NULL, &retflag, 0, 0);
 		break;
 	case V4L2_DAEMON_VIDIOC_STREAMOFF_CAPTURE:
-		ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
-			ctx->mediacfg.decparams.dec_info.io_buffer.outBufFormat, NULL, &retflag, 0, 0);
+		if (isencoder(ctx))
+			ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
+				ctx->mediacfg.encparams.general.codecFormat, NULL, &retflag, 0, 0);
+		else
+			ret = vsi_v4l2_sendcmd(id, ctx->ctxid,
+				ctx->mediacfg.decparams.dec_info.io_buffer.outBufFormat, NULL, &retflag, 0, 0);
 		break;
 	case V4L2_DAEMON_VIDIOC_STREAMON_OUTPUT:
 		ret = vsi_v4l2_sendcmd(id, ctx->ctxid, ctx->mediacfg.decparams.dec_info.io_buffer.inputFormat,
@@ -490,7 +502,7 @@ tail:
 	if (ctx) {
 		if (ret < 0) {
 			vsi_set_ctx_error(ctx, ret);
-			v4l2_klog(LOGLVL_ERROR, "fail to communicate with daemon, error=%d", ret);
+			v4l2_klog(LOGLVL_ERROR, "%lx fail to communicate with daemon, error=%d, cmd=%d", ctx->ctxid, ret, id);
 		} else
 			set_bit(CTX_FLAG_DAEMONLIVE_BIT, &ctx->flag);
 	}
@@ -540,9 +552,10 @@ int vsi_v4l2_addinstance(pid_t *ppid)
 	if (mutex_lock_interruptible(&instance_lock))
 		return -EBUSY;
 
-	if (v4l2_fn >= MAX_STREAMS)
+	if (v4l2_fn >= MAX_STREAMS) {
+		v4l2_klog(LOGLVL_WARNING, "opened instances more than max count:%d\n", v4l2_fn);
 		ret = -EBUSY;
-	else {
+	} else {
 		v4l2_fn++;
 		if (v4l2_fn == 1 && invoke_vsidaemon) {
 			ret = invoke_daemonapp();
@@ -624,6 +637,9 @@ static int vsi_handle_daemonmsg(struct vsi_v4l2_msg *pmsg)
 		return vsi_v4l2_handle_cropchange(pmsg);
 	case V4L2_DAEMON_VIDIOC_WARNONOPTION:
 		return vsi_v4l2_handle_warningmsg(pmsg);
+	case V4L2_DAEMON_VIDIOC_STREAMOFF_CAPTURE_DONE:
+	case V4L2_DAEMON_VIDIOC_STREAMOFF_OUTPUT_DONE:
+		return vsi_v4l2_handle_streamoffdone(pmsg);
 	default:
 		return -EINVAL;
 	}
@@ -642,9 +658,6 @@ static ssize_t v4l2_msg_write(struct file *fh, const char __user *buf, size_t si
 		v4l2_klog(LOGLVL_ERROR, "input data unaccessable");
 		return size;
 	}
-	if (mutex_lock_interruptible(&ret_lock))
-		return size;
-
 	pmsg = kzalloc(sizeof(struct vsi_v4l2_msg), GFP_KERNEL);
 	if (copy_from_user((void *)pmsg,
 		(void __user *)buf, sizeof(struct vsi_v4l2_msg_hdr)) != 0) {
@@ -666,17 +679,22 @@ static ssize_t v4l2_msg_write(struct file *fh, const char __user *buf, size_t si
 	v4l2_klog(LOGLVL_VERBOSE, "get msg  id = %d, flag = %x, seqid = %lx, err = %d",
 		pmsg->cmd_id, pmsg->param_type, pmsg->seq_id, pmsg->error);
 	accubytes += sizeof(struct vsi_v4l2_msg_hdr) + msgsize;
+
 	if (pmsg->seq_id == NO_RESPONSE_SEQID) {
-		ret = 0;
 		vsi_handle_daemonmsg(pmsg);
 		kfree(pmsg);
-	} else {
-		ret = idr_alloc(retarray, (void *)pmsg, 1, 0, GFP_KERNEL);
-		if (ret < 0)
-			kfree(pmsg);
+		return size;
 	}
-error:
+	if (mutex_lock_interruptible(&ret_lock)) {
+		kfree(pmsg);
+		return size;
+	}
+	ret = idr_alloc(retarray, (void *)pmsg, 1, 0, GFP_KERNEL);
 	mutex_unlock(&ret_lock);
+	if (ret < 0)
+		kfree(pmsg);
+
+error:
 	if (ret >= 0)
 		wake_up_interruptible_all(&ret_queue);
 

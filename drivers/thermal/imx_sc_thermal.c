@@ -150,6 +150,7 @@ static int imx_sc_thermal_probe(struct platform_device *pdev)
 	for_each_available_child_of_node(np, child) {
 		sensor = devm_kzalloc(&pdev->dev, sizeof(*sensor), GFP_KERNEL);
 		if (!sensor) {
+			of_node_put(child);
 			of_node_put(sensor_np);
 			return -ENOMEM;
 		}
@@ -161,6 +162,7 @@ static int imx_sc_thermal_probe(struct platform_device *pdev)
 			dev_err(&pdev->dev,
 				"failed to get valid sensor resource id: %d\n",
 				ret);
+			of_node_put(child);
 			break;
 		}
 
@@ -171,6 +173,7 @@ static int imx_sc_thermal_probe(struct platform_device *pdev)
 		if (IS_ERR(sensor->tzd)) {
 			dev_err(&pdev->dev, "failed to register thermal zone\n");
 			ret = PTR_ERR(sensor->tzd);
+			of_node_put(child);
 			break;
 		}
 
@@ -181,7 +184,7 @@ static int imx_sc_thermal_probe(struct platform_device *pdev)
 		sensor->temp_passive = trip[0].temperature;
 		sensor->temp_critical = trip[1].temperature;
 
-		sensor->cdev = devfreq_cooling_register(NULL, 1);
+		sensor->cdev = device_cooling_register(NULL, 1);
 		if (IS_ERR(sensor->cdev)) {
 			dev_err(&pdev->dev,
 				"failed to register devfreq cooling device: %d\n",
@@ -199,7 +202,7 @@ static int imx_sc_thermal_probe(struct platform_device *pdev)
 			dev_err(&sensor->tzd->device,
 				"binding zone %s with cdev %s failed:%d\n",
 				sensor->tzd->type, sensor->cdev->type, ret);
-			devfreq_cooling_unregister(sensor->cdev);
+			device_cooling_unregister(sensor->cdev);
 			return ret;
 		}
 	}

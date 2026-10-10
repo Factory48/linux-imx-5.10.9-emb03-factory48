@@ -27,6 +27,8 @@ static const struct soc_device_attribute imx8_soc[] = {
 		.revision = "1.0",
 	}, {
 		.soc_id   = "i.MX8MP",
+	}, {
+		.soc_id   = "i.MX8ULP",
 	},
 };
 
@@ -443,16 +445,18 @@ static int mxc_isi_imx8mp_parse_resets(struct mxc_isi_dev *mxc_isi)
 	struct device *dev = &mxc_isi->pdev->dev;
 	struct reset_control *reset;
 
-	reset = devm_reset_control_get(dev, "isi_rst_proc");
+	reset = devm_reset_control_get_optional_shared(dev, "isi_rst_proc");
 	if (IS_ERR(reset)) {
-		dev_err(dev, "Failed to get isi proc reset control\n");
+		if (PTR_ERR(reset) != -EPROBE_DEFER)
+			dev_err(dev, "Failed to get isi proc reset control\n");
 		return PTR_ERR(reset);
 	}
 	mxc_isi->isi_rst_proc = reset;
 
-	reset = devm_reset_control_get(dev, "isi_rst_apb");
+	reset = devm_reset_control_get_optional_shared(dev, "isi_rst_apb");
 	if (IS_ERR(reset)) {
-		dev_err(dev, "Failed to get isi apb reset control\n");
+		if (PTR_ERR(reset) != -EPROBE_DEFER)
+			dev_err(dev, "Failed to get isi apb reset control\n");
 		return PTR_ERR(reset);
 	}
 	mxc_isi->isi_rst_apb = reset;
@@ -513,19 +517,22 @@ static int mxc_isi_imx8mp_gclk_get(struct mxc_isi_dev *mxc_isi)
 
 	mxc_isi->isi_proc = devm_clk_get(dev, "media_blk_isi_proc");
 	if (IS_ERR(mxc_isi->isi_proc)) {
-		dev_err(dev, "Failed to get media isi proc clock\n");
+		if (PTR_ERR(mxc_isi->isi_proc) != -EPROBE_DEFER)
+			dev_err(dev, "Failed to get media isi proc clock\n");
 		return -ENODEV;
 	}
 
 	mxc_isi->isi_apb = devm_clk_get(dev, "media_blk_isi_apb");
 	if (IS_ERR(mxc_isi->isi_apb)) {
-		dev_err(dev, "Failed to get media isi apb clock\n");
+		if (PTR_ERR(mxc_isi->isi_apb) != -EPROBE_DEFER)
+			dev_err(dev, "Failed to get media isi apb clock\n");
 		return -ENODEV;
 	}
 
 	mxc_isi->isi_bus = devm_clk_get(dev, "media_blk_bus");
 	if (IS_ERR(mxc_isi->isi_bus)) {
-		dev_err(dev, "Failed to get media bus clock\n");
+		if (PTR_ERR(mxc_isi->isi_bus) != -EPROBE_DEFER)
+			dev_err(dev, "Failed to get media bus clock\n");
 		return -ENODEV;
 	}
 
@@ -580,6 +587,13 @@ static struct mxc_isi_plat_data mxc_imx8mp_data = {
 	.set_thd  = &mxc_imx8_isi_thd_v1,
 	.rst_ops  = &mxc_imx8mp_isi_rst_ops,
 	.gclk_ops = &mxc_imx8mp_isi_gclk_ops,
+};
+
+static struct mxc_isi_plat_data mxc_imx8ulp_data = {
+	.ops      = &mxc_imx8_clk_ops,
+	.chan_src = &mxc_imx8mn_chan_src,
+	.ier_reg  = &mxc_imx8_isi_ier_v2,
+	.set_thd  = &mxc_imx8_isi_thd_v1,
 };
 
 static int mxc_isi_parse_dt(struct mxc_isi_dev *mxc_isi)
@@ -641,7 +655,7 @@ static int mxc_isi_soc_match(struct mxc_isi_dev *mxc_isi,
 
 	match = soc_device_match(data);
 	if (!match)
-		return -EINVAL;
+		return -EPROBE_DEFER;
 
 	mxc_isi->buf_active_reverse = false;
 
@@ -653,7 +667,8 @@ static int mxc_isi_soc_match(struct mxc_isi_dev *mxc_isi,
 			memcpy(set_thd, &mxc_imx8_isi_thd_v1, sizeof(*set_thd));
 			mxc_isi->buf_active_reverse = true;
 		}
-	} else if (!strcmp(match->soc_id, "i.MX8MP")) {
+	} else if (!strcmp(match->soc_id, "i.MX8MP") ||
+		   !strcmp(match->soc_id, "i.MX8ULP")) {
 		memcpy(ier_reg, &mxc_imx8_isi_ier_v2, sizeof(*ier_reg));
 		mxc_isi->buf_active_reverse = true;
 	}
@@ -687,7 +702,8 @@ static int mxc_isi_probe(struct platform_device *pdev)
 
 	ret = mxc_isi_soc_match(mxc_isi, imx8_soc);
 	if (ret < 0) {
-		dev_err(dev, "Can't match soc version\n");
+		if (ret != -EPROBE_DEFER)
+			dev_err(dev, "Can't match soc version\n");
 		return ret;
 	}
 
@@ -714,7 +730,8 @@ static int mxc_isi_probe(struct platform_device *pdev)
 
 	ret = disp_mix_sft_parse_resets(mxc_isi);
 	if (ret) {
-		dev_err(dev, "Can not parse reset control for isi\n");
+		if (ret != -EPROBE_DEFER)
+			dev_err(dev, "Can not parse reset control for isi\n");
 		return ret;
 	}
 
@@ -766,6 +783,7 @@ static int mxc_isi_probe(struct platform_device *pdev)
 		dev_warn(dev, "Populate child platform device fail\n");
 
 	mxc_isi_clk_disable(mxc_isi);
+	disp_mix_clks_enable(mxc_isi, false);
 
 	platform_set_drvdata(pdev, mxc_isi);
 	pm_runtime_enable(dev);
@@ -842,6 +860,7 @@ static const struct of_device_id mxc_isi_of_match[] = {
 	{.compatible = "fsl,imx8-isi", .data = &mxc_imx8_data },
 	{.compatible = "fsl,imx8mn-isi", .data = &mxc_imx8mn_data },
 	{.compatible = "fsl,imx8mp-isi", .data = &mxc_imx8mp_data },
+	{.compatible = "fsl,imx8ulp-isi", .data = &mxc_imx8ulp_data },
 	{ /* sentinel */ },
 };
 MODULE_DEVICE_TABLE(of, mxc_isi_of_match);

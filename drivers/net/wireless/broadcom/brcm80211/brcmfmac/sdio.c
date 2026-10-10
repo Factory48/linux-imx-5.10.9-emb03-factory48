@@ -617,12 +617,7 @@ BRCMF_FW_DEF(4339, "brcmfmac4339-sdio");
 BRCMF_FW_DEF(43430A0, "brcmfmac43430a0-sdio");
 /* Note the names are not postfixed with a1 for backward compatibility */
 BRCMF_FW_DEF(43430A1, "brcmfmac43430-sdio");
-/* EMB03 vendor ships the validated CYW43455 firmware/NVRAM/CLM together.
- * Keep other chips on their existing Broadcom firmware mappings.
- */
-static const char BRCM_43455_FIRMWARE_BASENAME[] =
-	"cypress/cyfmac43455-sdio";
-MODULE_FIRMWARE("cypress/cyfmac43455-sdio.bin");
+BRCMF_FW_DEF(43455, "brcmfmac43455-sdio");
 BRCMF_FW_DEF(43456, "brcmfmac43456-sdio");
 BRCMF_FW_DEF(4354, "brcmfmac4354-sdio");
 BRCMF_FW_DEF(4356, "brcmfmac4356-sdio");
@@ -4162,7 +4157,6 @@ static int brcmf_sdio_bus_reset(struct device *dev)
 	if (ret) {
 		brcmf_err("Failed to probe after sdio device reset: ret %d\n",
 			  ret);
-		brcmf_sdiod_remove(sdiodev);
 	}
 
 	return ret;

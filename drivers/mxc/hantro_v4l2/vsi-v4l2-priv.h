@@ -26,8 +26,8 @@
 #include "vsi-v4l2.h"
 
 #define CTX_SEQID_UPLIMT 0x7FFFFFFF
-#define CTX_ARRAY_ID(ctxid)	(ctxid & 0xFFFFFFFF)
-#define CTX_SEQ_ID(ctxid)	(ctxid >> 32)
+#define CTX_ARRAY_ID(ctxid)	((ctxid) & 0xFFFFFFFF)
+#define CTX_SEQ_ID(ctxid)	((ctxid) >> 32)
 
 #define MIN_FRAME_4ENC	1
 
@@ -41,6 +41,9 @@
 #define DEFAULT_QP			30
 
 #define DEFAULT_PIXELDEPTH		10		//set outputPixelDepth to this will make daemon return default pixeldepth
+
+#define VSI_DEFAULT_WIDTH		320
+#define VSI_DEFAULT_HEIGHT		240
 
 #if KERNEL_VERSION(5, 5, 0) > LINUX_VERSION_CODE
 #define VSI_DEVTYPE	VFL_TYPE_GRABBER
@@ -155,8 +158,7 @@ enum CTX_STATUS {
 	ENC_STATUS_ENCODING,
 	ENC_STATUS_DRAINING,
 	ENC_STATUS_STOPPED,
-	ENC_STATUS_STOPPED_BYUSR,
-	ENC_STATUS_RESET,
+	ENC_STATUS_EOS,
 
 	DEC_STATUS_DECODING,
 	DEC_STATUS_DRAINING,
@@ -191,8 +193,10 @@ struct vsi_v4l2_mediacfg {
 
 	/* from set format */
 	//unsigned int width;
+	s32 width_src;
 	//move to encparams.general.width
 	//unsigned int height;
+	s32 height_src;
 	//move to encparams.general.height
 	//unsigned int pixelformat;
 	//move to encparams.general.inputFormat
@@ -207,12 +211,14 @@ struct vsi_v4l2_mediacfg {
 	u32 flags;		/* format flags (V4L2_PIX_FMT_FLAG_*) */
 	u32 quantization;	/* enum v4l2_quantization */
 	u32 xfer_func;	/* enum v4l2_xfer_func */
+	u32 ycbcr_enc;
 	u32 minbuf_4capture;
 	u32 minbuf_4output;
 	u32 multislice_mode;
 	u32 infmt_fourcc;
 	u32 outfmt_fourcc;
 	u32 src_pixeldepth;	//dec only
+	u32 orig_dpbsize;	//dec only
 	/*profiles for each format is put here instead of encparams to save some transfer data*/
 	s32 profile_h264;
 	s32 profile_hevc;
@@ -228,9 +234,13 @@ struct vsi_v4l2_mediacfg {
 	struct v4l2_enc_ipcm_params ipcminfo;
 
 	/*internal storage*/
-	struct v4l2_daemon_enc_params encparams;
-	struct v4l2_daemon_dec_params decparams;
+	union {
+		struct v4l2_daemon_enc_params encparams;
+		struct v4l2_daemon_dec_params decparams;
+	};
 	struct v4l2_daemon_dec_params decparams_bkup;
+	s32 minbuf_4output_bkup;
+	s32 sizeimagedst_bkup;
 };
 
 struct vsi_v4l2_device {
@@ -277,6 +287,10 @@ enum {
 	CTX_FLAG_FORCEIDR_BIT,			// force idr invoked
 	CTX_FLAG_SRCCHANGED_BIT,			// src change has come from daemon
 	CTX_FLAG_DELAY_SRCCHANGED_BIT,	// src change has come from daemon	 but not sent to app
+	CTX_FLAG_SRCBUF_BIT,				// if any src buf comes from last OUTPUT off or INIT
+	CTX_FLAG_ENC_FLUSHBUF,				// if any src buf comes from last OUTPUT off or INIT
+	CTX_FLAG_CAPTUREOFFDONE,			// daemon finish handling capoff
+	CTX_FLAG_OUTPUTOFFDONE,				// daemon finish handling outputoff
 };
 
 /* flag for decoder buffer*/
@@ -309,17 +323,16 @@ struct vsi_v4l2_ctx {
 
 	u32 rfc_luma_offset[VIDEO_MAX_FRAME];
 	u32 rfc_chroma_offset[VIDEO_MAX_FRAME];
-	u32 queued_srcnum;
-	u32 buffed_capnum;
-	u32 buffed_cropcapnum;
+	s32 queued_srcnum;
+	s32 buffed_capnum;
+	s32 buffed_cropcapnum;
 	u32 lastcapbuffer_idx;	//latest received capture buffer index
-
-	struct list_head queued_list;
 
 	struct vsi_v4l2_mediacfg mediacfg;
 
 	struct v4l2_ctrl_handler ctrlhdl;
 	wait_queue_head_t retbuf_queue;
+	wait_queue_head_t capoffdone_queue;
 
 	uint64_t frameidx;
 
@@ -327,6 +340,10 @@ struct vsi_v4l2_ctx {
 	atomic_t dstframen;
 	struct cropinfo *crophead;
 	struct cropinfo *croptail;
+
+	u32 reschange_cnt;
+	bool reschanged_need_notify;
+	bool need_capture_on;
 };
 
 int vsi_v4l2_release(struct file *filp);
@@ -338,8 +355,10 @@ int vsi_v4l2_reset_ctx(struct vsi_v4l2_ctx *ctx);
 int vsi_v4l2_send_reschange(struct vsi_v4l2_ctx *ctx);
 int vsi_v4l2_notify_reschange(struct vsi_v4l2_msg *pmsg);
 int vsi_v4l2_handle_warningmsg(struct vsi_v4l2_msg *pmsg);
+int vsi_v4l2_handle_streamoffdone(struct vsi_v4l2_msg *pmsg);
 int vsi_v4l2_handle_cropchange(struct vsi_v4l2_msg *pmsg);
 int vsi_v4l2_bufferdone(struct vsi_v4l2_msg *pmsg);
+void vsi_v4l2_sendeos(struct vsi_v4l2_ctx *ctx);
 int vsi_v4l2_handleerror(unsigned long ctxtid, int error);
 int vsi_v4l2_handle_picconsumed(struct vsi_v4l2_msg *pmsg);
 struct video_device *vsi_v4l2_probe_enc(
@@ -361,16 +380,21 @@ int vsi_v4l2_addinstance(pid_t *ppid);
 int vsi_v4l2_quitinstance(void);
 int vsi_v4l2_daemonalive(void);
 
+void vsi_dec_update_reso(struct vsi_v4l2_ctx *ctx);
+int vsi_dec_capture_on(struct vsi_v4l2_ctx *ctx);
 void vsi_dec_updatevui(struct v4l2_daemon_dec_info *src, struct v4l2_daemon_dec_info *dst);
-void vsi_dec_getvui(struct v4l2_format *v4l2fmt, struct v4l2_daemon_dec_info *decinfo);
+void vsi_dec_getvui(struct vsi_v4l2_ctx *ctx, struct v4l2_format *fmt);
 void vsi_enum_encfsize(struct v4l2_frmsizeenum *f, u32 pixel_format);
+int vsiv4l2_enc_getalign(u32 srcfmt, u32 dstfmt, int width);
 void vsiv4l2_initcfg(struct vsi_v4l2_ctx *ctx);
 int vsi_get_Level(struct vsi_v4l2_ctx *ctx, int mediatype, int dir, int level);
+int vsiv4l2_verifyfmt(struct vsi_v4l2_ctx *ctx, struct v4l2_format *fmt);
 int vsiv4l2_setfmt(struct vsi_v4l2_ctx *ctx, struct v4l2_format *fmt);
 int vsiv4l2_getfmt(struct vsi_v4l2_ctx *ctx, struct v4l2_format *fmt);
-void vsiv4l2_buffer_config(
+void vsi_v4l2_update_decfmt(struct vsi_v4l2_ctx *ctx);
+int vsiv4l2_buffer_config(
 	struct vsi_v4l2_ctx *ctx,
-	int type,
+	struct vb2_queue *vq,
 	unsigned int *nbuffers,
 	unsigned int *nplanes,
 	unsigned int sizes[]
@@ -475,6 +499,7 @@ static inline int update_and_removecropinfo(struct vsi_v4l2_ctx *ctx)
 		pcfg->decparams.dec_info.io_buffer.output_width = crop->frame_width;
 		pcfg->decparams.dec_info.io_buffer.output_height = crop->frame_height;
 		pcfg->decparams.dec_info.io_buffer.output_wstride = crop->pic_wstride;
+		pcfg->bytesperline = crop->pic_wstride;
 		pcfg->decparams.dec_info.dec_info.frame_width = crop->frame_width;
 		pcfg->decparams.dec_info.dec_info.frame_height = crop->frame_height;
 		pcfg->decparams.dec_info.dec_info.visible_rect.left = crop->left;
@@ -525,6 +550,16 @@ static inline void printbufinfo(struct vb2_queue *vq)
 	v4l2_klog(LOGLVL_VERBOSE, "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@");
 }
 
+static inline int inst_isactive(struct vsi_v4l2_ctx *ctx)
+{
+	if (ctx->status == DEC_STATUS_DECODING ||
+		ctx->status == DEC_STATUS_DRAINING ||
+		ctx->status == ENC_STATUS_ENCODING ||
+		ctx->status == ENC_STATUS_DRAINING)
+		return 1;
+	return 0;
+}
+
 static inline void return_all_buffers(struct vb2_queue *vq, int status, int bRelbuf)
 {
 	int i;
@@ -533,8 +568,7 @@ static inline void return_all_buffers(struct vb2_queue *vq, int status, int bRel
 	struct list_head *plist;
 
 	v4l2_klog(LOGLVL_FLOW, "%s", __func__);
-	if (mutex_lock_interruptible(&ctx->ctxlock))
-		return;
+
 	if (binputqueue(vq->type))
 		plist = &ctx->input_list;
 	else
@@ -554,7 +588,6 @@ static inline void return_all_buffers(struct vb2_queue *vq, int status, int bRel
 			v4l2_klog(LOGLVL_FLOW, "clear buffer %d", buf->vb.vb2_buf.index);
 		}
 	}
-	mutex_unlock(&ctx->ctxlock);
 }
 
 static inline void print_queinfo(struct vb2_queue *q)
@@ -573,6 +606,22 @@ static inline void print_queinfo(struct vb2_queue *q)
 				k, (unsigned long)data, buf->planes[k].length, buf->planes[k].m.offset);
 		}
 	}
+}
+
+static inline int vsi_checkctx_outputoffdone(struct vsi_v4l2_ctx *ctx)
+{
+	if (test_and_clear_bit(CTX_FLAG_OUTPUTOFFDONE, &ctx->flag)
+		|| ctx->error < 0)
+		return 1;
+	return 0;
+}
+
+static inline int vsi_checkctx_capoffdone(struct vsi_v4l2_ctx *ctx)
+{
+	if (test_and_clear_bit(CTX_FLAG_CAPTUREOFFDONE, &ctx->flag)
+		|| ctx->error < 0)
+		return 1;
+	return 0;
 }
 
 #endif	//VSI_V4L2_PRIV_H

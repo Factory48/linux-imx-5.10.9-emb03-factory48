@@ -98,7 +98,8 @@
 #define OV5640_REG_AVG_READOUT		0x56a1
 
 enum ov5640_mode_id {
-	OV5640_MODE_QCIF_176_144 = 0,
+	OV5640_MODE_QQVGA_160_120 = 0,
+	OV5640_MODE_QCIF_176_144,
 	OV5640_MODE_QVGA_320_240,
 	OV5640_MODE_VGA_640_480,
 	OV5640_MODE_NTSC_720_480,
@@ -943,6 +944,7 @@ static int ov5640_check_valid_mode(struct ov5640_dev *sensor,
 	int ret = 0;
 
 	switch (mode->id) {
+	case OV5640_MODE_QQVGA_160_120:
 	case OV5640_MODE_QCIF_176_144:
 	case OV5640_MODE_QVGA_320_240:
 	case OV5640_MODE_NTSC_720_480:
@@ -1289,7 +1291,17 @@ static int ov5640_set_stream_dvp(struct ov5640_dev *sensor, bool on)
 
 static int ov5640_set_stream_mipi(struct ov5640_dev *sensor, bool on)
 {
+	const struct ov5640_mode_info *mode;
+	u8 line_sync;
 	int ret;
+
+	mode = sensor->current_mode;
+	line_sync = (mode->id == OV5640_MODE_XGA_1024_768 ||
+		     mode->id == OV5640_MODE_QSXGA_2592_1944) ? 0 : 1;
+	ret = ov5640_write_reg(sensor, OV5640_REG_MIPI_CTRL00,
+			       0x24 | (line_sync << 4));
+	if (ret)
+		return ret;
 
 	/*
 	 * Enable/disable the MIPI interface
@@ -1609,8 +1621,9 @@ ov5640_find_mode(struct ov5640_dev *sensor, enum ov5640_frame_rate fr,
 				      width, height);
 
 	if (!mode ||
-	    (!nearest && (mode->hact != width || mode->vact != height)))
+	    (!nearest && (mode->hact != width || mode->vact != height))) {
 		return NULL;
+	}
 
 	return mode;
 }
@@ -2024,9 +2037,10 @@ static int ov5640_set_power_mipi(struct ov5640_dev *sensor, bool on)
 	 *
 	 * 0x4800 = 0x24
 	 * [5] = 1	: Gate clock when 'no packets'
+	 * [4] = 1	: Line sync enable
 	 * [2] = 1	: MIPI bus in LP11 when 'no packets'
 	 */
-	ret = ov5640_write_reg(sensor, OV5640_REG_MIPI_CTRL00, 0x24);
+	ret = ov5640_write_reg(sensor, OV5640_REG_MIPI_CTRL00, 0x34);
 	if (ret)
 		return ret;
 

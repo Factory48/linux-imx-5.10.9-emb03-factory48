@@ -1877,7 +1877,7 @@ static int gpmi_ecc_read_page_raw(struct nand_chip *chip, uint8_t *buf,
 	/* Extract interleaved payload data and ECC bits */
 	for (step = 0; step < nfc_geo->ecc_chunk_count; step++) {
 		if (buf)
-			nand_extract_bits(buf, step * eccsize, tmp_buf,
+			nand_extract_bits(buf, step * eccsize * 8, tmp_buf,
 					  src_bit_off, eccsize * 8);
 		src_bit_off += eccsize * 8;
 
@@ -2216,7 +2216,7 @@ static int mx23_boot_init(struct gpmi_nand_data  *this)
 		 */
 		chipnr = block >> (chip->chip_shift - chip->phys_erase_shift);
 		page = block << (chip->phys_erase_shift - chip->page_shift);
-		byte = block <<  chip->phys_erase_shift;
+		byte = (loff_t)block <<  chip->phys_erase_shift;
 
 		/* Send the command to read the conventional block mark. */
 		nand_select_target(chip, chipnr);
@@ -2598,11 +2598,11 @@ static int gpmi_nfc_exec_op(struct nand_chip *chip,
 						   &direct);
 			break;
 		}
+	}
 
-		if (!desc) {
-			ret = -ENXIO;
-			goto unmap;
-		}
+	if (!desc) {
+		ret = -ENXIO;
+		goto unmap;
 	}
 
 	dev_dbg(this->dev, "%s setup done\n", __func__);
@@ -2717,7 +2717,7 @@ static int gpmi_nand_init(struct gpmi_nand_data *this)
 	this->bch_geometry.auxiliary_size = 128;
 	ret = gpmi_alloc_dma_buffer(this);
 	if (ret)
-		goto err_out;
+		return ret;
 
 	nand_controller_init(&this->base);
 	this->base.ops = &gpmi_nand_controller_ops;

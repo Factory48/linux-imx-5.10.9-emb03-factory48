@@ -2,7 +2,7 @@
 /*
  * V4L2 Media Controller Driver for NXP IMX8QXP/QM SOC
  *
- * Copyright (c) 2019 NXP Semiconductor
+ * Copyright 2019-2021 NXP
  *
  */
 
@@ -774,14 +774,21 @@ static int register_isi_entity(struct mxc_md *mxc_md,
 			       struct mxc_isi_info *mxc_isi)
 {
 	struct v4l2_subdev *sd;
-	int ret;
+	int ret = 0;
 
 	sd = get_subdev_by_node(mxc_isi->node);
 	if (!sd) {
-		dev_info(&mxc_md->pdev->dev,
-			 "deferring %s device registration\n",
-			 mxc_isi->node->name);
-		return -EPROBE_DEFER;
+		ret = of_device_is_available(mxc_isi->node);
+		if (!ret) {
+			dev_info(&mxc_md->pdev->dev, "%s device is disabled\n",
+				 mxc_isi->node->name);
+		} else {
+			dev_info(&mxc_md->pdev->dev,
+				 "deferring %s registration\n",
+				 mxc_isi->node->name);
+			ret = -EPROBE_DEFER;
+		}
+		return ret;
 	}
 
 	if (mxc_isi->id >= MXC_ISI_MAX_DEVS)
@@ -1104,6 +1111,7 @@ static int mxc_md_probe(struct platform_device *pdev)
 			} else {
 				/* no sensors connected */
 				mxc_md_unregister_all(mxc_md);
+				v4l2_async_notifier_unregister(&mxc_md->subdev_notifier);
 			}
 		}
 	}

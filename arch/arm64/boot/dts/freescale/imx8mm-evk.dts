@@ -75,7 +75,7 @@
 		#size-cells = <1>;
 		compatible = "jedec,spi-nor";
 		spi-max-frequency = <80000000>;
-		spi-tx-bus-width = <4>;
+		spi-tx-bus-width = <1>;
 		spi-rx-bus-width = <4>;
 	};
 };
@@ -86,12 +86,19 @@
 	pinctrl-1 = <&pinctrl_usdhc1_100mhz>, <&pinctrl_wlan>;
 	pinctrl-2 = <&pinctrl_usdhc1_200mhz>, <&pinctrl_wlan>;
 	bus-width = <4>;
-	cap-power-off-card;
-	pm-ignore-notify;
 	keep-power-in-suspend;
 	non-removable;
+	wakeup-source;
 	mmc-pwrseq = <&usdhc1_pwrseq>;
+	fsl,sdio-interrupt-enabled;
 	status = "okay";
+
+	wifi_wake_host {
+		compatible = "nxp,wifi-wake-host";
+		interrupt-parent = <&gpio2>;
+		interrupts = <9 IRQ_TYPE_LEVEL_LOW>;
+		interrupt-names = "host-wake";
+	};
 };
 
 &usdhc3 {
@@ -170,7 +177,7 @@
 	pinctrl_wlan: wlangrp {
 		fsl,pins = <
 			MX8MM_IOMUXC_GPIO1_IO00_ANAMIX_REF_CLK_32K	0x141
-			MX8MM_IOMUXC_SD1_DATA7_GPIO2_IO9		0x111
+			MX8MM_IOMUXC_SD1_DATA7_GPIO2_IO9		0x159
 		>;
 	};
 };

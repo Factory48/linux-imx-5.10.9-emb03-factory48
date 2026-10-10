@@ -102,17 +102,6 @@
 		reg = <0x00000000 0x40000000 0 0xc0000000>;
 	};
 
-	reserved-memory {
-		#address-cells = <2>;
-		#size-cells = <2>;
-		ranges;
-
-		rpmsg_reserved: rpmsg@0xb8000000 {
-			no-map;
-			reg = <0 0xb8000000 0 0x400000>;
-		};
-	};
-
 	modem_reset: modem-reset {
 		compatible = "gpio-reset";
 		reset-gpios = <&gpio3 5 GPIO_ACTIVE_LOW>;
@@ -278,7 +267,7 @@
 		model = "ak4458-audio";
 		audio-cpu = <&sai1>;
 		audio-codec = <&ak4458_1>, <&ak4458_2>;
-		reset-gpios = <&gpio3 18 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpio3 18 GPIO_ACTIVE_LOW>;
 	};
 
 	sound-ak5558 {
@@ -613,13 +602,13 @@
 	ak5558: ak5558@13 {
 		compatible = "asahi-kasei,ak5558";
 		reg = <0x13>;
-		reset-gpios = <&gpio3 17 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpio3 17 GPIO_ACTIVE_LOW>;
 	};
 
 	ak4497: ak4497@11 {
 		compatible = "asahi-kasei,ak4497";
 		reg = <0x11>;
-		reset-gpios = <&gpio3 16 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpio3 16 GPIO_ACTIVE_LOW>;
 		dsd-path = <1>;
 	};
 
@@ -674,10 +663,16 @@
 		 <&clk IMX8MQ_CLK_PCIE1_PHY>,
 		 <&pcie0_refclk>;
 	clock-names = "pcie", "pcie_aux", "pcie_phy", "pcie_bus";
-	assigned-clocks = <&clk IMX8MQ_CLK_PCIE1_AUX>;
-	assigned-clock-rates = <10000000>;
-	assigned-clock-parents = <&clk IMX8MQ_SYS2_PLL_50M>;
+	assigned-clocks = <&clk IMX8MQ_CLK_PCIE1_AUX>,
+			  <&clk IMX8MQ_CLK_PCIE1_PHY>,
+			  <&clk IMX8MQ_CLK_PCIE1_CTRL>;
+	assigned-clock-rates = <10000000>, <100000000>, <250000000>;
+	assigned-clock-parents = <&clk IMX8MQ_SYS2_PLL_50M>,
+				 <&clk IMX8MQ_SYS2_PLL_100M>,
+				 <&clk IMX8MQ_SYS2_PLL_250M>;
 	hard-wired = <1>;
+	vph-supply = <&vgen5_reg>;
+	l1ss-disabled;
 	status = "okay";
 };
 
@@ -691,10 +686,23 @@
 		 <&clk IMX8MQ_CLK_PCIE2_PHY>,
 		 <&pcie1_refclk>;
 	clock-names = "pcie", "pcie_aux", "pcie_phy", "pcie_bus";
-	assigned-clocks = <&clk IMX8MQ_CLK_PCIE2_AUX>;
-	assigned-clock-rates = <10000000>;
-	assigned-clock-parents = <&clk IMX8MQ_SYS2_PLL_50M>;
+	assigned-clocks = <&clk IMX8MQ_CLK_PCIE2_AUX>,
+			  <&clk IMX8MQ_CLK_PCIE1_PHY>,
+			  <&clk IMX8MQ_CLK_PCIE1_CTRL>;
+	assigned-clock-rates = <10000000>, <100000000>, <250000000>;
+	assigned-clock-parents = <&clk IMX8MQ_SYS2_PLL_50M>,
+				 <&clk IMX8MQ_SYS2_PLL_100M>,
+				 <&clk IMX8MQ_SYS2_PLL_250M>;
+	vph-supply = <&vgen5_reg>;
+	l1ss-disabled;
 	status = "okay";
+
+	wifi_wake_host {
+		compatible = "nxp,wifi-wake-host";
+		interrupt-parent = <&gpio5>;
+		interrupts = <11 IRQ_TYPE_LEVEL_LOW>;
+		interrupt-names = "host-wake";
+	};
 };
 
 &pcie1_ep {
@@ -705,9 +713,13 @@
 		 <&clk IMX8MQ_CLK_PCIE2_PHY>,
 		 <&pcie1_refclk>;
 	clock-names = "pcie", "pcie_aux", "pcie_phy", "pcie_bus";
-	assigned-clocks = <&clk IMX8MQ_CLK_PCIE2_AUX>;
-	assigned-clock-rates = <10000000>;
-	assigned-clock-parents = <&clk IMX8MQ_SYS2_PLL_50M>;
+	assigned-clocks = <&clk IMX8MQ_CLK_PCIE2_AUX>,
+			  <&clk IMX8MQ_CLK_PCIE1_PHY>,
+			  <&clk IMX8MQ_CLK_PCIE1_CTRL>;
+	assigned-clock-rates = <10000000>, <100000000>, <250000000>;
+	assigned-clock-parents = <&clk IMX8MQ_SYS2_PLL_50M>,
+				 <&clk IMX8MQ_SYS2_PLL_100M>,
+				 <&clk IMX8MQ_SYS2_PLL_250M>;
 	status = "disabled";
 };
 
@@ -823,7 +835,7 @@
 		#size-cells = <1>;
 		compatible = "jedec,spi-nor";
 		spi-max-frequency = <29000000>;
-		spi-tx-bus-width = <4>;
+		spi-tx-bus-width = <1>;
 		spi-rx-bus-width = <4>;
 		spi-nor,ddr-quad-read-dummy = <6>;
 	};
@@ -1017,6 +1029,7 @@
 			MX8MQ_IOMUXC_I2C4_SDA_PCIE2_CLKREQ_B		0x76 /* open drain, pull up */
 			MX8MQ_IOMUXC_ECSPI2_SCLK_GPIO5_IO10		0x16
 			MX8MQ_IOMUXC_ECSPI2_MISO_GPIO5_IO12		0x16
+			MX8MQ_IOMUXC_ECSPI2_MOSI_GPIO5_IO11		0x41
 		>;
 	};
 

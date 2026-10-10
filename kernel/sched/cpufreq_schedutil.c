@@ -125,17 +125,12 @@ static bool sugov_up_down_rate_limit(struct sugov_policy *sg_policy, u64 time,
 static bool sugov_update_next_freq(struct sugov_policy *sg_policy, u64 time,
 				   unsigned int next_freq)
 {
-	bool should_update = true;
 	if (!sg_policy->need_freq_update) {
 		if (sg_policy->next_freq == next_freq)
 			return false;
 	} else {
 		sg_policy->need_freq_update = cpufreq_driver_test_flags(CPUFREQ_NEED_UPDATE_LIMITS);
 	}
-
-	trace_android_rvh_set_sugov_update(sg_policy, next_freq, &should_update);
-	if (!should_update)
-		return false;
 
 	if (sugov_up_down_rate_limit(sg_policy, time, next_freq))
 		return false;
@@ -194,9 +189,14 @@ static unsigned int get_next_freq(struct sugov_policy *sg_policy,
 	unsigned int freq = arch_scale_freq_invariant() ?
 				policy->cpuinfo.max_freq : policy->cur;
 	unsigned int coefficient = sg_policy->tunables->freq_coefficient;
+	unsigned long next_freq = 0;
 
-	freq = map_util_freq(util, freq * coefficient, max);
-	trace_sugov_next_freq_tp(policy->cpu, util, max, freq);
+	trace_android_vh_map_util_freq(util, freq, max, &next_freq, policy,
+			&sg_policy->need_freq_update);
+	if (next_freq)
+		freq = next_freq;
+	else
+		freq = map_util_freq(util, freq * coefficient, max);
 
 	if (freq == sg_policy->cached_raw_freq && !sg_policy->need_freq_update)
 		return sg_policy->next_freq;
@@ -489,9 +489,6 @@ static void sugov_update_single(struct update_util_data *hook, u64 time,
 
 	util = sugov_get_util(sg_cpu);
 	max = sg_cpu->max;
-
-	trace_sugov_util_update_tp(sg_cpu->cpu, util, max, flags);
-
 	util = sugov_iowait_apply(sg_cpu, time, util, max);
 	next_f = get_next_freq(sg_policy, util, max);
 	/*
@@ -548,7 +545,6 @@ sugov_update_shared(struct update_util_data *hook, u64 time, unsigned int flags)
 {
 	struct sugov_cpu *sg_cpu = container_of(hook, struct sugov_cpu, update_util);
 	struct sugov_policy *sg_policy = sg_cpu->sg_policy;
-	unsigned long util = sugov_get_util(sg_cpu);
 	unsigned int next_f;
 
 	raw_spin_lock(&sg_policy->update_lock);
@@ -560,8 +556,6 @@ sugov_update_shared(struct update_util_data *hook, u64 time, unsigned int flags)
 
 	if (sugov_should_update_freq(sg_policy, time)) {
 		next_f = sugov_next_freq_shared(sg_cpu, time);
-
-		trace_sugov_util_update_tp(sg_cpu->cpu, util, sg_cpu->max, flags);
 
 		if (sg_policy->policy->fast_switch_enabled)
 			sugov_fast_switch(sg_policy, time, next_f);
@@ -713,9 +707,17 @@ static struct attribute *sugov_attrs[] = {
 };
 ATTRIBUTE_GROUPS(sugov);
 
+static void sugov_tunables_free(struct kobject *kobj)
+{
+	struct gov_attr_set *attr_set = container_of(kobj, struct gov_attr_set, kobj);
+
+	kfree(to_sugov_tunables(attr_set));
+}
+
 static struct kobj_type sugov_tunables_ktype = {
 	.default_groups = sugov_groups,
 	.sysfs_ops = &governor_sysfs_ops,
+	.release = &sugov_tunables_free,
 };
 
 /********************** cpufreq governor interface *********************/
@@ -764,7 +766,6 @@ static int sugov_kthread_create(struct sugov_policy *sg_policy)
 	if (policy->fast_switch_enabled)
 		return 0;
 
-	trace_android_vh_set_sugov_sched_attr(&attr);
 	kthread_init_work(&sg_policy->work, sugov_work);
 	kthread_init_worker(&sg_policy->worker);
 	thread = kthread_create(kthread_worker_fn, &sg_policy->worker,
@@ -817,12 +818,10 @@ static struct sugov_tunables *sugov_tunables_alloc(struct sugov_policy *sg_polic
 	return tunables;
 }
 
-static void sugov_tunables_free(struct sugov_tunables *tunables)
+static void sugov_clear_global_tunables(void)
 {
 	if (!have_governor_per_policy())
 		global_tunables = NULL;
-
-	kfree(tunables);
 }
 
 static int sugov_init(struct cpufreq_policy *policy)
@@ -886,7 +885,7 @@ out:
 fail:
 	kobject_put(&tunables->attr_set.kobj);
 	policy->governor_data = NULL;
-	sugov_tunables_free(tunables);
+	sugov_clear_global_tunables();
 
 stop_kthread:
 	sugov_kthread_stop(sg_policy);
@@ -913,7 +912,7 @@ static void sugov_exit(struct cpufreq_policy *policy)
 	count = gov_attr_set_put(&tunables->attr_set, &sg_policy->tunables_hook);
 	policy->governor_data = NULL;
 	if (!count)
-		sugov_tunables_free(tunables);
+		sugov_clear_global_tunables();
 
 	mutex_unlock(&global_tunables_lock);
 

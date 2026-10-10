@@ -37,7 +37,8 @@
 
 #define IMX7D_M4_START			(IMX7D_ENABLE_M4 | IMX7D_SW_M4P_RST \
 					 | IMX7D_SW_M4C_RST)
-#define IMX7D_M4_STOP			IMX7D_SW_M4C_NON_SCLR_RST
+#define IMX7D_M4_STOP			(IMX7D_ENABLE_M4 | IMX7D_SW_M4C_RST | \
+					 IMX7D_SW_M4C_NON_SCLR_RST)
 
 /* Address: 0x020D8000 */
 #define IMX6SX_SRC_SCR			0x00
@@ -48,7 +49,7 @@
 
 #define IMX6SX_M4_START			(IMX6SX_ENABLE_M4 | IMX6SX_SW_M4P_RST \
 					 | IMX6SX_SW_M4C_RST)
-#define IMX6SX_M4_STOP			IMX6SX_SW_M4C_NON_SCLR_RST
+#define IMX6SX_M4_STOP			(IMX6SX_ENABLE_M4 | IMX6SX_SW_M4C_NON_SCLR_RST)
 #define IMX6SX_M4_RST_MASK		(IMX6SX_ENABLE_M4 | IMX6SX_SW_M4P_RST \
 					 | IMX6SX_SW_M4C_NON_SCLR_RST \
 					 | IMX6SX_SW_M4C_RST)
@@ -352,6 +353,76 @@ static int imx_rproc_ready(struct rproc *rproc)
 	return 0;
 }
 
+static int imx_rproc_rebuild_channels(struct rproc *rproc)
+{
+	struct imx_rproc *priv = rproc->priv;
+	struct mbox_client *cl = &priv->cl;
+	struct device *dev = priv->dev;
+	int ret = 0;
+
+	if (!priv->tx_ch) {
+		priv->tx_ch = mbox_request_channel_byname(cl, "tx");
+		if (IS_ERR(priv->tx_ch)) {
+			ret = PTR_ERR(priv->tx_ch);
+			dev_err(dev, "failed to restart tx chan %d\n", ret);
+			priv->tx_ch = NULL;
+
+			goto err_exit;
+		}
+	}
+
+	if (!priv->rx_ch) {
+		priv->rx_ch = mbox_request_channel_byname(cl, "rx");
+		if (IS_ERR(priv->rx_ch)) {
+			ret = PTR_ERR(priv->rx_ch);
+			dev_err(dev, "failed to restart rx chan %d\n", ret);
+			priv->rx_ch = NULL;
+
+			goto err_exit;
+		}
+	}
+
+	if (!priv->rxdb_ch) {
+		priv->rxdb_ch = mbox_request_channel_byname(cl, "rxdb");
+		if (IS_ERR(priv->rxdb_ch)) {
+			ret = PTR_ERR(priv->rxdb_ch);
+			dev_err(dev, "failed to restart rxdb chan %d\n", ret);
+			priv->rxdb_ch = NULL;
+
+			goto err_exit;
+		}
+	}
+
+	/* txdb is optional */
+	if (!priv->txdb_ch) {
+		priv->txdb_ch = mbox_request_channel_byname(cl, "txdb");
+		if (IS_ERR(priv->txdb_ch))
+			priv->txdb_ch = NULL;
+	}
+
+err_exit:
+	return ret;
+}
+
+static void imx_rproc_free_channels(struct rproc *rproc)
+{
+	struct imx_rproc *priv = rproc->priv;
+	__u32 mmsg;
+
+	if (priv->txdb_ch)
+		mbox_send_message(priv->txdb_ch, (void *)&mmsg);
+
+	mbox_free_channel(priv->tx_ch);
+	mbox_free_channel(priv->rx_ch);
+	mbox_free_channel(priv->rxdb_ch);
+	mbox_free_channel(priv->txdb_ch);
+
+	priv->tx_ch = NULL;
+	priv->rx_ch = NULL;
+	priv->rxdb_ch = NULL;
+	priv->txdb_ch = NULL;
+}
+
 static int imx_rproc_start(struct rproc *rproc)
 {
 	struct imx_rproc *priv = rproc->priv;
@@ -370,8 +441,15 @@ static int imx_rproc_start(struct rproc *rproc)
 		ret = res.a0;
 		break;
 	case IMX_SCU_API:
-		if (priv->ipc_only)
+		if (priv->ipc_only) {
+			if (rproc->table_ptr == NULL)
+				rproc->table_ptr = kmemdup(priv->rsc_va, SZ_1K, GFP_KERNEL);
+			ret = imx_rproc_rebuild_channels(rproc);
+			if (ret < 0)
+				return -EINVAL;
 			return imx_rproc_ready(rproc);
+		}
+
 		if (priv->id == 1)
 			ret = imx_sc_pm_cpu_start(ipc_handle, priv->rsrc, true, 0x38fe0000);
 		else if (!priv->id)
@@ -410,6 +488,8 @@ static int imx_rproc_stop(struct rproc *rproc)
 	}
 
 	if (rproc->state == RPROC_CRASHED && priv->ipc_only) {
+		imx_rproc_free_channels(rproc);
+
 		priv->flags &= ~REMOTE_IS_READY;
 		return 0;
 	}
@@ -636,20 +716,7 @@ static int imx_rproc_get_loaded_rsc_table(struct device *dev,
 	if (!priv->rsc_va)
 		return 0;
 
-#if 0
 	rproc->table_ptr = (struct resource_table *)priv->rsc_va;
-#else
-	/*
-	 * This is a hack workaround, this will not let M4 detect vdev status,
-	 * because vring is conflict with resource table,
-	 * because NXP M4 SDK not detect vdev status update, so we just use a copied
-	 * table here, for future, m4 need use a new address for publishing resource table
-	 * Then we could change to
-	 * rproc->table_ptr = (struct resource_table *)priv->rsc_va;
-	 */
-	priv->rsc_table = kmemdup(priv->rsc_va, SZ_1K, GFP_KERNEL);
-	rproc->table_ptr = priv->rsc_table;
-#endif
 	rproc->table_sz = SZ_1K;
 	rproc->cached_table = NULL;
 
@@ -717,14 +784,8 @@ imx_rproc_elf_find_loaded_rsc_table(struct rproc *rproc, const struct firmware *
 		return NULL;
 	}
 
-#if 0
-	/*
-	 * We not return this currently, because vring conflicts with resource table on NXP
-	 * i.MX M4 SDK
-	 */
 	if (priv->rsc_va)
 		return priv->rsc_va;
-#endif
 
 	return rproc_elf_find_loaded_rsc_table(rproc, fw);
 }
@@ -943,7 +1004,7 @@ static int imx_rproc_detect_mode(struct imx_rproc *priv)
 			dev_err(dev, "Failed to read src\n");
 			return ret;
 		}
-		priv->early_boot = !(val & dcfg->src_stop);
+		priv->early_boot = ((val & dcfg->src_mask) != dcfg->src_stop);
 		break;
 	case IMX_ARM_SMCCC:
 		arm_smccc_smc(IMX_SIP_SRC, IMX_SIP_SRC_M4_STARTED, 0, 0, 0, 0, 0, 0, &res);

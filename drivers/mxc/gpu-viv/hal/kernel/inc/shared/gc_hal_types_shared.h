@@ -127,7 +127,11 @@ extern "C" {
 
 #if defined(ANDROID) && defined(__BIONIC_FORTIFY)
 #if defined(__clang__)
-#       define gcmINLINE            __inline__ __attribute__ ((always_inline)) __attribute__ ((gnu_inline))
+#if (__clang_major__ >= 10)
+#           define gcmINLINE            __inline__ __attribute__ ((always_inline))
+#       else
+#           define gcmINLINE            __inline__ __attribute__ ((always_inline)) __attribute__ ((gnu_inline))
+#       endif
 #   else
 #       define gcmINLINE            __inline__ __attribute__ ((always_inline)) __attribute__ ((gnu_inline)) __attribute__ ((artificial))
 #   endif
@@ -906,6 +910,10 @@ struct _gckQUEUE
     gctUINT32                   size;
 };
 
+#ifdef LINUX_VERSION_CODE
+typedef struct list_head * gcsLISTHEAD_PTR;
+typedef struct list_head  gcsLISTHEAD;
+#else
 typedef struct _gcsLISTHEAD * gcsLISTHEAD_PTR;
 typedef struct _gcsLISTHEAD
 {
@@ -913,6 +921,7 @@ typedef struct _gcsLISTHEAD
     gcsLISTHEAD_PTR     next;
 }
 gcsLISTHEAD;
+#endif
 
 /*
  * 'Patch' here means a mechanism to let kernel side modify user space reserved

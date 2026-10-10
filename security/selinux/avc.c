@@ -30,8 +30,6 @@
 #include "avc.h"
 #include "avc_ss.h"
 #include "classmap.h"
-#include "ss/services.h"
-#include "ss/sidtab.h"
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/avc.h>
@@ -45,6 +43,9 @@
 #else
 #define avc_cache_stats_incr(field)	do {} while (0)
 #endif
+
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/avc.h>
 
 struct avc_entry {
 	u32			ssid;
@@ -299,26 +300,27 @@ static struct avc_xperms_decision_node
 	struct avc_xperms_decision_node *xpd_node;
 	struct extended_perms_decision *xpd;
 
-	xpd_node = kmem_cache_zalloc(avc_xperms_decision_cachep, GFP_NOWAIT);
+	xpd_node = kmem_cache_zalloc(avc_xperms_decision_cachep,
+				     GFP_NOWAIT | __GFP_NOWARN);
 	if (!xpd_node)
 		return NULL;
 
 	xpd = &xpd_node->xpd;
 	if (which & XPERMS_ALLOWED) {
 		xpd->allowed = kmem_cache_zalloc(avc_xperms_data_cachep,
-						GFP_NOWAIT);
+						GFP_NOWAIT | __GFP_NOWARN);
 		if (!xpd->allowed)
 			goto error;
 	}
 	if (which & XPERMS_AUDITALLOW) {
 		xpd->auditallow = kmem_cache_zalloc(avc_xperms_data_cachep,
-						GFP_NOWAIT);
+						GFP_NOWAIT | __GFP_NOWARN);
 		if (!xpd->auditallow)
 			goto error;
 	}
 	if (which & XPERMS_DONTAUDIT) {
 		xpd->dontaudit = kmem_cache_zalloc(avc_xperms_data_cachep,
-						GFP_NOWAIT);
+						GFP_NOWAIT | __GFP_NOWARN);
 		if (!xpd->dontaudit)
 			goto error;
 	}
@@ -346,7 +348,7 @@ static struct avc_xperms_node *avc_xperms_alloc(void)
 {
 	struct avc_xperms_node *xp_node;
 
-	xp_node = kmem_cache_zalloc(avc_xperms_cachep, GFP_NOWAIT);
+	xp_node = kmem_cache_zalloc(avc_xperms_cachep, GFP_NOWAIT | __GFP_NOWARN);
 	if (!xp_node)
 		return xp_node;
 	INIT_LIST_HEAD(&xp_node->xpd_head);
@@ -442,6 +444,7 @@ static void avc_node_free(struct rcu_head *rhead)
 
 static void avc_node_delete(struct selinux_avc *avc, struct avc_node *node)
 {
+	trace_android_vh_selinux_avc_node_delete(node);
 	hlist_del_rcu(&node->list);
 	call_rcu(&node->rhead, avc_node_free);
 	atomic_dec(&avc->avc_cache.active_nodes);
@@ -458,6 +461,7 @@ static void avc_node_kill(struct selinux_avc *avc, struct avc_node *node)
 static void avc_node_replace(struct selinux_avc *avc,
 			     struct avc_node *new, struct avc_node *old)
 {
+	trace_android_vh_selinux_avc_node_replace(old, new);
 	hlist_replace_rcu(&old->list, &new->list);
 	call_rcu(&old->rhead, avc_node_free);
 	atomic_dec(&avc->avc_cache.active_nodes);
@@ -502,7 +506,7 @@ static struct avc_node *avc_alloc_node(struct selinux_avc *avc)
 {
 	struct avc_node *node;
 
-	node = kmem_cache_zalloc(avc_node_cachep, GFP_NOWAIT);
+	node = kmem_cache_zalloc(avc_node_cachep, GFP_NOWAIT | __GFP_NOWARN);
 	if (!node)
 		goto out;
 
@@ -566,8 +570,10 @@ static struct avc_node *avc_lookup(struct selinux_avc *avc,
 	avc_cache_stats_incr(lookups);
 	node = avc_search_node(avc, ssid, tsid, tclass);
 
-	if (node)
+	if (node) {
+		trace_android_vh_selinux_avc_lookup(node, ssid, tsid, tclass);
 		return node;
+	}
 
 	avc_cache_stats_incr(misses);
 	return NULL;
@@ -651,6 +657,7 @@ static struct avc_node *avc_insert(struct selinux_avc *avc,
 		}
 	}
 	hlist_add_head_rcu(&node->list, head);
+	trace_android_vh_selinux_avc_insert(node);
 found:
 	spin_unlock_irqrestore(lock, flag);
 	return node;
@@ -760,70 +767,6 @@ static void avc_audit_post_callback(struct audit_buffer *ab, void *a)
 	}
 }
 
-static bool avc_test_maintenance_denial(struct selinux_state *state,
-				      u32 ssid, u32 tsid,
-				      struct common_audit_data *a)
-{
-	struct selinux_policy *policy;
-	struct context *source, *target;
-	const char *source_type, *target_type;
-	struct dentry *dentry = NULL;
-	bool sensitive = false;
-
-	rcu_read_lock();
-	policy = rcu_dereference(state->policy);
-	if (!policy)
-		goto out;
-	source = sidtab_search(policy->sidtab, ssid);
-	target = sidtab_search(policy->sidtab, tsid);
-	if (!source || !target || !source->type || !target->type ||
-	    source->type > policy->policydb.p_types.nprim ||
-	    target->type > policy->policydb.p_types.nprim)
-		goto out;
-	source_type = sym_name(&policy->policydb, SYM_TYPES, source->type - 1);
-	target_type = sym_name(&policy->policydb, SYM_TYPES, target->type - 1);
-	if (!source_type || !target_type ||
-	    (strcmp(source_type, "untrusted_app") &&
-	     strncmp(source_type, "untrusted_app_", sizeof("untrusted_app_") - 1)))
-		goto out;
-
-	/* The stock label covers /data/adb and its children without pathname
-	 * allocation, traversal races, or a broad substring match.
-	 */
-	if (!strcmp(target_type, "adb_data_file")) {
-		sensitive = true;
-		goto out;
-	}
-	if (!a)
-		goto out;
-	switch (a->type) {
-	case LSM_AUDIT_DATA_PATH:
-		dentry = a->u.path.dentry;
-		break;
-	case LSM_AUDIT_DATA_DENTRY:
-		dentry = a->u.dentry;
-		break;
-	case LSM_AUDIT_DATA_FILE:
-		if (a->u.file)
-			dentry = a->u.file->f_path.dentry;
-		break;
-	case LSM_AUDIT_DATA_IOCTL_OP:
-		if (a->u.op)
-			dentry = a->u.op->path.dentry;
-		break;
-	}
-	if (dentry) {
-		spin_lock(&dentry->d_lock);
-		sensitive = !strcmp(dentry->d_name.name, "su") ||
-			    !strcmp(dentry->d_name.name, "ksu") ||
-			    !strcmp(dentry->d_name.name, "ksud");
-		spin_unlock(&dentry->d_lock);
-	}
-out:
-	rcu_read_unlock();
-	return sensitive;
-}
-
 /* This is the slow part of avc audit with big stack footprint */
 noinline int slow_avc_audit(struct selinux_state *state,
 			    u32 ssid, u32 tsid, u16 tclass,
@@ -835,13 +778,6 @@ noinline int slow_avc_audit(struct selinux_state *state,
 
 	if (WARN_ON(!tclass || tclass >= ARRAY_SIZE(secclass_map)))
 		return -EINVAL;
-	/* Filter before common_lsm_audit creates the record. This does not
-	 * change the AVC decision or suppress maintenance/system diagnostics.
-	 */
-	if (denied && result == -EACCES &&
-	    avc_test_maintenance_denial(state, ssid, tsid, a))
-		return 0;
-
 
 	if (!a) {
 		a = &stack_data;

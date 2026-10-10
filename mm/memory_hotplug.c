@@ -596,8 +596,7 @@ void generic_online_page(struct page *page, unsigned int order)
 	 * so we should map it first. This is better than introducing a special
 	 * case in page freeing fast path.
 	 */
-	if (debug_pagealloc_enabled_static())
-		kernel_map_pages(page, 1 << order, 1);
+	debug_pagealloc_map_pages(page, 1 << order);
 	__free_pages_core(page, order);
 	totalram_pages_add(1UL << order);
 #ifdef CONFIG_HIGHMEM
@@ -765,8 +764,8 @@ static inline struct zone *default_zone_for_pfn(int nid, unsigned long start_pfn
 	return movable_node_enabled ? movable_zone : kernel_zone;
 }
 
-struct zone * zone_for_pfn_range(int online_type, int nid, unsigned start_pfn,
-		unsigned long nr_pages)
+struct zone *zone_for_pfn_range(int online_type, int nid,
+		unsigned long start_pfn, unsigned long nr_pages)
 {
 	if (online_type == MMOP_ONLINE_KERNEL)
 		return default_kernel_zone_for_pfn(nid, start_pfn, nr_pages);
@@ -1020,7 +1019,7 @@ static int online_memory_block(struct memory_block *mem, void *arg)
  */
 int __ref add_memory_resource(int nid, struct resource *res, mhp_t mhp_flags)
 {
-	struct mhp_params params = { .pgprot = PAGE_KERNEL };
+	struct mhp_params params = { .pgprot = pgprot_mhp(PAGE_KERNEL) };
 	u64 start, size;
 	bool new_node = false;
 	int ret;
@@ -1142,7 +1141,7 @@ int add_memory_subsection(int nid, u64 start, u64 size)
 
 	if (!IS_ALIGNED(start, SUBSECTION_SIZE) ||
 	    !IS_ALIGNED(size, SUBSECTION_SIZE)) {
-		pr_err("%s: start 0x%lx size 0x%lx not aligned to subsection size\n",
+		pr_err("%s: start 0x%llx size 0x%llx not aligned to subsection size\n",
 			   __func__, start, size);
 		return -EINVAL;
 	}
@@ -1162,7 +1161,7 @@ int add_memory_subsection(int nid, u64 start, u64 size)
 	if (ret) {
 		if (IS_ENABLED(CONFIG_ARCH_KEEP_MEMBLOCK))
 			memblock_remove(start, size);
-		pr_err("%s failed to add subsection start 0x%lx size 0x%lx\n",
+		pr_err("%s failed to add subsection start 0x%llx size 0x%llx\n",
 			   __func__, start, size);
 	}
 	mem_hotplug_done();
@@ -1319,6 +1318,8 @@ do_migrate_range(unsigned long start_pfn, unsigned long end_pfn)
 	struct page *page, *head;
 	int ret = 0;
 	LIST_HEAD(source);
+	static DEFINE_RATELIMIT_STATE(migrate_rs, DEFAULT_RATELIMIT_INTERVAL,
+				      DEFAULT_RATELIMIT_BURST);
 
 	for (pfn = start_pfn; pfn < end_pfn; pfn++) {
 		if (!pfn_valid(pfn))
@@ -1365,8 +1366,10 @@ do_migrate_range(unsigned long start_pfn, unsigned long end_pfn)
 						    page_is_file_lru(page));
 
 		} else {
-			pr_warn("failed to isolate pfn %lx\n", pfn);
-			dump_page(page, "isolation failed");
+			if (__ratelimit(&migrate_rs)) {
+				pr_warn("failed to isolate pfn %lx\n", pfn);
+				dump_page(page, "isolation failed");
+			}
 		}
 		put_page(page);
 	}
@@ -1395,9 +1398,11 @@ do_migrate_range(unsigned long start_pfn, unsigned long end_pfn)
 			(unsigned long)&mtc, MIGRATE_SYNC, MR_MEMORY_HOTPLUG);
 		if (ret) {
 			list_for_each_entry(page, &source, lru) {
-				pr_warn("migrating pfn %lx failed ret:%d ",
-				       page_to_pfn(page), ret);
-				dump_page(page, "migration failure");
+				if (__ratelimit(&migrate_rs)) {
+					pr_warn("migrating pfn %lx failed ret:%d\n",
+						page_to_pfn(page), ret);
+					dump_page(page, "migration failure");
+				}
 			}
 			putback_movable_pages(&source);
 		}
@@ -1532,14 +1537,17 @@ int __ref offline_pages(unsigned long start_pfn, unsigned long nr_pages)
 	}
 	node = zone_to_nid(zone);
 
+	lru_cache_disable();
 	/* set above range as isolated */
 	ret = start_isolate_page_range(start_pfn, end_pfn,
 				       MIGRATE_MOVABLE,
-				       MEMORY_OFFLINE | REPORT_FAILURE);
+				       MEMORY_OFFLINE | REPORT_FAILURE, NULL);
 	if (ret) {
 		reason = "failure to isolate range";
 		goto failed_removal;
 	}
+
+	drain_all_pages(zone);
 
 	arg.start_pfn = start_pfn;
 	arg.nr_pages = nr_pages;
@@ -1562,7 +1570,6 @@ int __ref offline_pages(unsigned long start_pfn, unsigned long nr_pages)
 			}
 
 			cond_resched();
-			lru_add_drain_all();
 
 			ret = scan_movable_pages(pfn, end_pfn, &pfn);
 			if (!ret) {
@@ -1591,18 +1598,17 @@ int __ref offline_pages(unsigned long start_pfn, unsigned long nr_pages)
 		}
 
 		/*
-		 * per-cpu pages are drained in start_isolate_page_range, but if
-		 * there are still pages that are not free, make sure that we
-		 * drain again, because when we isolated range we might
-		 * have raced with another thread that was adding pages to pcp
-		 * list.
+		 * per-cpu pages are drained after start_isolate_page_range, but
+		 * if there are still pages that are not free, make sure that we
+		 * drain again, because when we isolated range we might have
+		 * raced with another thread that was adding pages to pcp list.
 		 *
 		 * Forward progress should be still guaranteed because
 		 * pages on the pcp list can only belong to MOVABLE_ZONE
 		 * because has_unmovable_pages explicitly checks for
 		 * PageBuddy on freed pages on other zones.
 		 */
-		ret = test_pages_isolated(start_pfn, end_pfn, MEMORY_OFFLINE);
+		ret = test_pages_isolated(start_pfn, end_pfn, MEMORY_OFFLINE, NULL);
 		if (ret)
 			drain_all_pages(zone);
 	} while (ret);
@@ -1620,6 +1626,7 @@ int __ref offline_pages(unsigned long start_pfn, unsigned long nr_pages)
 	zone->nr_isolate_pageblock -= nr_pages / pageblock_nr_pages;
 	spin_unlock_irqrestore(&zone->lock, flags);
 
+	lru_cache_enable();
 	/* removal success */
 	adjust_managed_page_count(pfn_to_page(start_pfn), -nr_pages);
 	zone->present_pages -= nr_pages;
@@ -1835,20 +1842,12 @@ int remove_memory_subsection(int nid, u64 start, u64 size)
 
 	if (!IS_ALIGNED(start, SUBSECTION_SIZE) ||
 	    !IS_ALIGNED(size, SUBSECTION_SIZE)) {
-		pr_err("%s: start 0x%lx size 0x%lx not aligned to subsection size\n",
+		pr_err("%s: start 0x%llx size 0x%llx not aligned to subsection size\n",
 			   __func__, start, size);
 		return -EINVAL;
 	}
 
 	mem_hotplug_begin();
-
-	if (test_pages_isolated(start, start + size, MEMORY_OFFLINE)) {
-		pr_err("%s: [%lx, %lx) PFNs are not isolated\n",
-			   __func__, start, start + size);
-		mem_hotplug_done();
-		return -EBUSY;
-	}
-
 	arch_remove_memory(nid, start, size, NULL);
 
 	if (IS_ENABLED(CONFIG_ARCH_KEEP_MEMBLOCK))

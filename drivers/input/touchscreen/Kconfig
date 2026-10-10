@@ -12,18 +12,6 @@ menuconfig INPUT_TOUCHSCREEN
 
 if INPUT_TOUCHSCREEN
 
-config TOUCHSCREEN_AXS15205_EMB03
-	tristate "EMB03 reconstructed AXS15205 touchscreen"
-	depends on I2C && OF && GPIOLIB
-	depends on DRM_PANEL_RAYDIUM_RM67191
-	help
-	  Board-specific 32-byte AXS15205 protocol with explicit EMB03 panel
-	  readiness and system PM handling. Requires a single panel using
-	  factory48,emb03-rm67191 (or legacy polyhex,emb03-rm67191); remains
-	  stopped when that panel is absent/OFF.
-	  Does not take ownership of reset GPIO or perform firmware updates.
-	  The module is called axs15205-emb03.
-
 config TOUCHSCREEN_PROPERTIES
 	def_tristate INPUT
 	depends on INPUT

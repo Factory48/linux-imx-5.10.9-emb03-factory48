@@ -5,7 +5,6 @@
  *  Copyright (C) 2003 Russell King, All Rights Reserved.
  *  Copyright (C) 2007-2008 Pierre Ossman
  *  Copyright (C) 2010 Linus Walleij
- *  Copyright 2020 NXP
  *
  *  MMC host class device management
  */
@@ -26,6 +25,7 @@
 #include <linux/mmc/slot-gpio.h>
 
 #include "core.h"
+#include "crypto.h"
 #include "host.h"
 #include "slot-gpio.h"
 #include "pwrseq.h"
@@ -35,17 +35,55 @@
 
 static DEFINE_IDA(mmc_host_ida);
 
+#ifdef CONFIG_PM_SLEEP
+static int mmc_host_class_prepare(struct device *dev)
+{
+	struct mmc_host *host = cls_dev_to_mmc_host(dev);
+
+	/*
+	 * It's safe to access the bus_ops pointer, as both userspace and the
+	 * workqueue for detecting cards are frozen at this point.
+	 */
+	if (!host->bus_ops)
+		return 0;
+
+	/* Validate conditions for system suspend. */
+	if (host->bus_ops->pre_suspend)
+		return host->bus_ops->pre_suspend(host);
+
+	return 0;
+}
+
+static void mmc_host_class_complete(struct device *dev)
+{
+	struct mmc_host *host = cls_dev_to_mmc_host(dev);
+
+	_mmc_detect_change(host, 0, false);
+}
+
+static const struct dev_pm_ops mmc_host_class_dev_pm_ops = {
+	.prepare = mmc_host_class_prepare,
+	.complete = mmc_host_class_complete,
+};
+
+#define MMC_HOST_CLASS_DEV_PM_OPS (&mmc_host_class_dev_pm_ops)
+#else
+#define MMC_HOST_CLASS_DEV_PM_OPS NULL
+#endif
+
 static void mmc_host_classdev_release(struct device *dev)
 {
 	struct mmc_host *host = cls_dev_to_mmc_host(dev);
 	wakeup_source_unregister(host->ws);
-	ida_simple_remove(&mmc_host_ida, host->index);
+	if (of_alias_get_id(host->parent->of_node, "mmc") < 0)
+		ida_simple_remove(&mmc_host_ida, host->index);
 	kfree(host);
 }
 
 static struct class mmc_host_class = {
 	.name		= "mmc_host",
 	.dev_release	= mmc_host_classdev_release,
+	.pm		= MMC_HOST_CLASS_DEV_PM_OPS,
 };
 
 int mmc_register_host_class(void)
@@ -336,66 +374,48 @@ int mmc_of_parse(struct mmc_host *host)
 EXPORT_SYMBOL(mmc_of_parse);
 
 /**
- * mmc_parse_voltage - return mask of supported voltages
- * @dev: The device need to be parsed.
+ * mmc_of_parse_voltage - return mask of supported voltages
+ * @np: The device node need to be parsed.
  * @mask: mask of voltages available for MMC/SD/SDIO
  *
- * Parse the "voltage-ranges" property, returning zero if it is not
+ * Parse the "voltage-ranges" DT property, returning zero if it is not
  * found, negative errno if the voltage-range specification is invalid,
  * or one if the voltage-range is specified and successfully parsed.
  */
-int mmc_parse_voltage(struct device *dev, u32 *mask)
+int mmc_of_parse_voltage(struct device_node *np, u32 *mask)
 {
-	u32 *voltage_ranges;
+	const u32 *voltage_ranges;
 	int num_ranges, i;
-	int ret;
 
-	num_ranges = device_property_read_u32_array(dev, "voltage-ranges",
-						    NULL, 0);
-	if (num_ranges < 0) {
-		dev_err(dev, "voltage-ranges unspecified\n");
-		return -EINVAL;
-	}
-
-	if (num_ranges / 2 == 0) {
-		dev_err(dev, "voltage-ranges empty\n");
-		return -EINVAL;
-	}
-
-	voltage_ranges = kcalloc(num_ranges, sizeof(u32), GFP_KERNEL);
+	voltage_ranges = of_get_property(np, "voltage-ranges", &num_ranges);
 	if (!voltage_ranges) {
-		dev_err(dev, "kcalloc failed in %s\n", __func__);
-		return -ENOMEM;
+		pr_debug("%pOF: voltage-ranges unspecified\n", np);
+		return 0;
 	}
-
-	ret = device_property_read_u32_array(dev, "voltage-ranges",
-					     voltage_ranges, num_ranges);
-	if (ret) {
-		dev_err(dev, "voltage-ranges unspecified\n");
-		kfree(voltage_ranges);
-		return ret;
+	num_ranges = num_ranges / sizeof(*voltage_ranges) / 2;
+	if (!num_ranges) {
+		pr_err("%pOF: voltage-ranges empty\n", np);
+		return -EINVAL;
 	}
-
-	num_ranges = num_ranges / 2;
 
 	for (i = 0; i < num_ranges; i++) {
 		const int j = i * 2;
 		u32 ocr_mask;
 
-		ocr_mask = mmc_vddrange_to_ocrmask(voltage_ranges[j],
-						   voltage_ranges[j + 1]);
+		ocr_mask = mmc_vddrange_to_ocrmask(
+				be32_to_cpu(voltage_ranges[j]),
+				be32_to_cpu(voltage_ranges[j + 1]));
 		if (!ocr_mask) {
-			dev_err(dev, "voltage-range #%d is invalid\n", i);
-			kfree(voltage_ranges);
+			pr_err("%pOF: voltage-range #%d is invalid\n",
+				np, i);
 			return -EINVAL;
 		}
 		*mask |= ocr_mask;
 	}
 
-	kfree(voltage_ranges);
 	return 1;
 }
-EXPORT_SYMBOL(mmc_parse_voltage);
+EXPORT_SYMBOL(mmc_of_parse_voltage);
 
 /**
  * mmc_first_nonreserved_index() - get the first index that is not reserved
@@ -420,7 +440,7 @@ static int mmc_first_nonreserved_index(void)
  */
 struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
 {
-	int err;
+	int index;
 	struct mmc_host *host;
 	int alias_id, min_idx, max_idx;
 
@@ -433,20 +453,19 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
 
 	alias_id = of_alias_get_id(dev->of_node, "mmc");
 	if (alias_id >= 0) {
-		min_idx = alias_id;
-		max_idx = alias_id + 1;
+		index = alias_id;
 	} else {
 		min_idx = mmc_first_nonreserved_index();
 		max_idx = 0;
+
+		index = ida_simple_get(&mmc_host_ida, min_idx, max_idx, GFP_KERNEL);
+		if (index < 0) {
+			kfree(host);
+			return NULL;
+		}
 	}
 
-	err = ida_simple_get(&mmc_host_ida, min_idx, max_idx, GFP_KERNEL);
-	if (err < 0) {
-		kfree(host);
-		return NULL;
-	}
-
-	host->index = err;
+	host->index = index;
 
 	dev_set_name(&host->class_dev, "mmc%d", host->index);
 	host->ws = wakeup_source_register(NULL, dev_name(&host->class_dev));
@@ -514,9 +533,6 @@ int mmc_add_host(struct mmc_host *host)
 #endif
 
 	mmc_start_host(host);
-	if (!(host->pm_caps& MMC_PM_IGNORE_PM_NOTIFY))
-		mmc_register_pm_notifier(host);
-
 	return 0;
 }
 
@@ -532,8 +548,6 @@ EXPORT_SYMBOL(mmc_add_host);
  */
 void mmc_remove_host(struct mmc_host *host)
 {
-	if (!(host->pm_caps& MMC_PM_IGNORE_PM_NOTIFY))
-		mmc_unregister_pm_notifier(host);
 	mmc_stop_host(host);
 
 #ifdef CONFIG_DEBUG_FS

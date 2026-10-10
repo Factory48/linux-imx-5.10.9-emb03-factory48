@@ -96,14 +96,6 @@
 		};
 	};
 
-	modem_reset: modem-reset {
-		compatible = "gpio-reset";
-		reset-gpios = <&gpio2 6 GPIO_ACTIVE_LOW>;
-		reset-delay-us = <2000>;
-		reset-post-delay-ms = <40>;
-		#reset-cells = <0>;
-	};
-
 	pcie0_refclk: pcie0-refclk {
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
@@ -195,7 +187,7 @@
 		model = "ak4458-audio";
 		audio-cpu = <&sai1>;
 		audio-codec = <&ak4458_1>, <&ak4458_2>;
-		reset-gpios = <&pca6416 4 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&pca6416 4 GPIO_ACTIVE_LOW>;
 	};
 
 	sound-ak5558 {
@@ -408,7 +400,7 @@
 	status = "okay";
 
 	adv_bridge: adv7535@3d {
-		compatible = "adi,adv7533";
+		compatible = "adi,adv7535";
 		reg = <0x3d>;
 		adi,addr-cec = <0x3b>;
 		adi,dsi-lanes = <4>;
@@ -487,7 +479,7 @@
 	ak5558: ak5558@13 {
 		compatible = "asahi-kasei,ak5558";
 		reg = <0x13>;
-		reset-gpios = <&pca6416 3 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&pca6416 3 GPIO_ACTIVE_LOW>;
 		AVDD-supply = <&reg_audio_board>;
 		DVDD-supply = <&reg_audio_board>;
 	};
@@ -495,7 +487,7 @@
 	ak4497: ak4497@11 {
 		compatible = "asahi-kasei,ak4497";
 		reg = <0x11>;
-		reset-gpios = <&pca6416 5 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&pca6416 5 GPIO_ACTIVE_LOW>;
 		AVDD-supply = <&reg_audio_board>;
 		DVDD-supply = <&reg_audio_board>;
 		dsd-path = <1>;
@@ -525,6 +517,7 @@
 };
 
 &lcdif {
+       trusty;
        status = "okay";
 };
 
@@ -577,9 +570,13 @@
 		 <&clk IMX8MM_CLK_PCIE1_PHY>,
 		 <&pcie0_refclk>;
 	clock-names = "pcie", "pcie_aux", "pcie_phy", "pcie_bus";
-	assigned-clocks = <&clk IMX8MM_CLK_PCIE1_AUX>;
-	assigned-clock-rates = <10000000>;
-	assigned-clock-parents = <&clk IMX8MM_SYS_PLL2_50M>;
+	assigned-clocks = <&clk IMX8MM_CLK_PCIE1_AUX>,
+			  <&clk IMX8MM_CLK_PCIE1_PHY>,
+			  <&clk IMX8MM_CLK_PCIE1_CTRL>;
+	assigned-clock-rates = <10000000>, <100000000>, <250000000>;
+	assigned-clock-parents = <&clk IMX8MM_SYS_PLL2_50M>,
+				 <&clk IMX8MM_SYS_PLL2_100M>,
+				 <&clk IMX8MM_SYS_PLL2_250M>;
 	ext_osc = <1>;
 	status = "okay";
 };
@@ -592,10 +589,15 @@
 		 <&clk IMX8MM_CLK_PCIE1_PHY>,
 		 <&pcie0_refclk>;
 	clock-names = "pcie", "pcie_aux", "pcie_phy", "pcie_bus";
-	assigned-clocks = <&clk IMX8MM_CLK_PCIE1_AUX>;
-	assigned-clock-rates = <10000000>;
-	assigned-clock-parents = <&clk IMX8MM_SYS_PLL2_50M>;
+	assigned-clocks = <&clk IMX8MM_CLK_PCIE1_AUX>,
+			  <&clk IMX8MM_CLK_PCIE1_PHY>,
+			  <&clk IMX8MM_CLK_PCIE1_CTRL>;
+	assigned-clock-rates = <10000000>, <100000000>, <250000000>;
+	assigned-clock-parents = <&clk IMX8MM_SYS_PLL2_50M>,
+				 <&clk IMX8MM_SYS_PLL2_100M>,
+				 <&clk IMX8MM_SYS_PLL2_250M>;
 	ext_osc = <1>;
+	l1ss-disabled;
 	status = "disabled";
 };
 
@@ -684,7 +686,6 @@
 	assigned-clocks = <&clk IMX8MM_CLK_UART1>;
 	assigned-clock-parents = <&clk IMX8MM_SYS_PLL1_80M>;
 	fsl,uart-has-rtscts;
-	resets = <&modem_reset>;
 	status = "okay";
 };
 
@@ -709,6 +710,7 @@
 	srp-disable;
 	adp-disable;
 	usb-role-switch;
+	disable-over-current;
 	samsung,picophy-pre-emp-curr-control = <3>;
 	samsung,picophy-dc-vol-level-adjust = <7>;
 	status = "okay";
@@ -974,7 +976,6 @@
 			MX8MM_IOMUXC_UART1_TXD_UART1_DCE_TX     0x140
 			MX8MM_IOMUXC_UART3_RXD_UART1_DCE_CTS_B  0x140
 			MX8MM_IOMUXC_UART3_TXD_UART1_DCE_RTS_B  0x140
-			MX8MM_IOMUXC_SD1_DATA4_GPIO2_IO6        0x19
 		>;
 	};
 

@@ -187,7 +187,7 @@
 		#size-cells = <1>;
 		compatible = "jedec,spi-nor";
 		spi-max-frequency = <80000000>;
-		spi-tx-bus-width = <4>;
+		spi-tx-bus-width = <1>;
 		spi-rx-bus-width = <4>;
 	};
 };
@@ -355,7 +355,7 @@
 	ak5552: ak5552@13 {
 		compatible = "asahi-kasei,ak5552";
 		reg = <0x13>;
-		reset-gpios = <&pca6416 2 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&pca6416 2 GPIO_ACTIVE_LOW>;
 		AVDD-supply = <&reg_ab2_ana_pwr>;
 		DVDD-supply = <&reg_ab2_ana_pwr>;
 	};

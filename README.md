@@ -1,84 +1,150 @@
-# Linux 5.10.9 Kernel for EMB03
+# How do I submit patches to Android Common Kernels
 
-[![Build EMB03 Linux Kernel](https://github.com/Factory48/linux-imx-5.10.9-emb03-factory48/actions/workflows/build-kernel.yml/badge.svg)](https://github.com/Factory48/linux-imx-5.10.9-emb03-factory48/actions/workflows/build-kernel.yml)
-[![License: GPL-2.0](https://img.shields.io/badge/License-GPL%202.0-blue.svg)](COPYING)
+1. BEST: Make all of your changes to upstream Linux. If appropriate, backport to the stable releases.
+   These patches will be merged automatically in the corresponding common kernels. If the patch is already
+   in upstream Linux, post a backport of the patch that conforms to the patch requirements below.
+   - Do not send patches upstream that contain only symbol exports. To be considered for upstream Linux,
+additions of `EXPORT_SYMBOL_GPL()` require an in-tree modular driver that uses the symbol -- so include
+the new driver or changes to an existing driver in the same patchset as the export.
+   - When sending patches upstream, the commit message must contain a clear case for why the patch
+is needed and beneficial to the community. Enabling out-of-tree drivers or functionality is not
+not a persuasive case.
 
-Production Linux kernel source tree for the **EMB03** hardware platform (NXP i.MX8M Plus), maintained by **Factory48 Labs** (Singapore).
+2. LESS GOOD: Develop your patches out-of-tree (from an upstream Linux point-of-view). Unless these are
+   fixing an Android-specific bug, these are very unlikely to be accepted unless they have been
+   coordinated with kernel-team@android.com. If you want to proceed, post a patch that conforms to the
+   patch requirements below.
 
-Based on NXP official Android BSP release `android-11.0.0_2.0.0` (commit `24e30e721438600a496bcf1ae44cb4d7c93eafd8`, Linux kernel version `5.10.9-emb03-factory48`).
+# Common Kernel patch requirements
 
----
+- All patches must conform to the Linux kernel coding standards and pass `script/checkpatch.pl`
+- Patches shall not break gki_defconfig or allmodconfig builds for arm, arm64, x86, x86_64 architectures
+(see  https://source.android.com/setup/build/building-kernels)
+- If the patch is not merged from an upstream branch, the subject must be tagged with the type of patch:
+`UPSTREAM:`, `BACKPORT:`, `FROMGIT:`, `FROMLIST:`, or `ANDROID:`.
+- All patches must have a `Change-Id:` tag (see https://gerrit-review.googlesource.com/Documentation/user-changeid.html)
+- If an Android bug has been assigned, there must be a `Bug:` tag.
+- All patches must have a `Signed-off-by:` tag by the author and the submitter
 
-## Key Hardware Features & Integrated Drivers
+Additional requirements are listed below based on patch type
 
-- **PMIC & Power Rails**: NXP PCA9450 power management IC support with `factory48,emb03-ldo4-init` configuration (with legacy fallback).
-- **USB & Cold-Boot Hub Recovery**: DWC3 USB controller support with power cycling and hardware reset sequence for Terminus USB 2.0 Hub (VID:PID `1a40:0101`).
-- **Cellular 4G Modem**: Fibocom L716CN modem serial endpoints integrated into the `option` driver, preserving ECM network and ADB interfaces.
-- **Wi-Fi & WoWLAN**: Cypress CYW43455 SDIO Wi-Fi (`brcmfmac`) firmware basename alignment and legacy PNO scheduled scan fixes for reliable wake-on-wireless.
-- **MIPI DSI Display**: Raydium RM67191 AMOLED panel driver with factory DCS sequences, 720x1280 @ 80.29MHz timings, and dynamic panel lifecycle listener interface (`include/linux/emb03-panel.h`).
-- **Touchscreen**: AiXieSheng AXS15205 multi-touch I2C driver (Type-B multi-touch) with panel readiness synchronization and workqueue retry.
-- **Bluetooth**: Integrated `mx8_bt_rfkill` power and wake line management.
-- **Power Management & Batteryless Support**: Silergy SY6915 charging controller and CW2015 fuel gauge with `factory48,batteryless` mode support.
-- **Audio Subsystem**: Everest Semiconductor ES8316 codec and i.MX8MP SAI3 machine driver aligned with Android 48kHz HAL contract.
+## Requirements for backports from mainline Linux: `UPSTREAM:`, `BACKPORT:`
 
----
+- If the patch is a cherry-pick from Linux mainline with no changes at all
+    - tag the patch subject with `UPSTREAM:`.
+    - add upstream commit information with a `(cherry picked from commit ...)` line
+    - Example:
+        - if the upstream commit message is
+```
+        important patch from upstream
 
-## v10 Dedicated Test-Terminal Kernel
+        This is the detailed description of the important patch
 
-The `dev` cutover is for an owner-controlled EMB03 acceptance terminal, not a
-production trust claim. `/proc/cmdline` presents a software boot-state view;
-the kernel's saved command line, U-Boot, physical unlock state and eFuses remain
-unchanged. Empty-path `truncate` failures receive a 5 microsecond compensation
-budget that still requires timing calibration on the target board.
+        Signed-off-by: Fred Jones <fred.jones@foo.org>
+```
+>- then Joe Smith would upload the patch for the common kernel as
+```
+        UPSTREAM: important patch from upstream
 
-Privilege entry requires init-namespace UID/euid 2000 in the SELinux `shell`
-domain. Credentials are replaced with the standard COW API, seccomp is retained,
-and application allowlists cannot grant privilege. Runtime SELinux policy
-mutation and PTY relabeling are removed. Maintenance permissions must be supplied
-by the matching, compiled firmware policy: **do not deploy this kernel alone on
-the old firmware**. Application maintenance-path AVC decisions remain denied;
-only their audit records are filtered before creation. System-domain diagnostics
-are retained. OTA installation and reboot remain explicit human actions; CI only
-builds offline artifacts.
+        This is the detailed description of the important patch
 
+        Signed-off-by: Fred Jones <fred.jones@foo.org>
 
-## Build Instructions
-
-### Prerequisites
-- Host OS: Ubuntu 20.04 / 22.04 LTS x86_64
-- Host tools: `build-essential`, `bc`, `bison`, `flex`, `libssl-dev`, `libelf-dev`, `python3`, `ccache`
-- Cross Toolchain: Android Clang `r383902b` (`clang-6573524` / LLVM 11.0.2)
-
-### Building Locally
-
-```bash
-# 1. Export toolchain to PATH
-export PATH="/path/to/clang-r383902b/bin:$PATH"
-export CLANG_TRIPLE=aarch64-linux-gnu-
-
-# 2. Configure kernel
-make O=build/out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
-     CROSS_COMPILE=aarch64-linux-gnu- emb03_factory48_defconfig
-
-# 3. Build kernel Image and modules
-make O=build/out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
-     CROSS_COMPILE=aarch64-linux-gnu- \
-     KCFLAGS="-Werror=incompatible-pointer-types" \
-     -j$(nproc) Image modules
+        Bug: 135791357
+        Change-Id: I4caaaa566ea080fa148c5e768bb1a0b6f7201c01
+        (cherry picked from commit c31e73121f4c1ec41143423ac6ce3ce6dafdcec1)
+        Signed-off-by: Joe Smith <joe.smith@foo.org>
 ```
 
----
+- If the patch requires any changes from the upstream version, tag the patch with `BACKPORT:`
+instead of `UPSTREAM:`.
+    - use the same tags as `UPSTREAM:`
+    - add comments about the changes under the `(cherry picked from commit ...)` line
+    - Example:
+```
+        BACKPORT: important patch from upstream
 
-## CI / Automated Builds
+        This is the detailed description of the important patch
 
-Automated CI pipelines are configured via GitHub Actions (`.github/workflows/build-kernel.yml`):
-- **Ccache & Toolchain Cache**: Optimized compiler caching for fast incremental builds.
-- **Triggers**: Manual dispatch (`workflow_dispatch`) and version tag pushes (`v*`).
-- **Artifacts**: Generates `Image`, `modules.tar.gz`, `System.map`, `Module.symvers`, and checksums.
+        Signed-off-by: Fred Jones <fred.jones@foo.org>
 
----
+        Bug: 135791357
+        Change-Id: I4caaaa566ea080fa148c5e768bb1a0b6f7201c01
+        (cherry picked from commit c31e73121f4c1ec41143423ac6ce3ce6dafdcec1)
+        [joe: Resolved minor conflict in drivers/foo/bar.c ]
+        Signed-off-by: Joe Smith <joe.smith@foo.org>
+```
 
-## License & Copyright
+## Requirements for other backports: `FROMGIT:`, `FROMLIST:`,
 
-- The Linux kernel is licensed under the terms of the **GNU General Public License version 2 (GPL-2.0)**, as specified in `COPYING` and `LICENSES/preferred/GPL-2.0`.
-- Platform enhancements and drivers: Copyright &copy; 2026 **Factory48 Labs**. All rights reserved.
+- If the patch has been merged into an upstream maintainer tree, but has not yet
+been merged into Linux mainline
+    - tag the patch subject with `FROMGIT:`
+    - add info on where the patch came from as `(cherry picked from commit <sha1> <repo> <branch>)`. This
+must be a stable maintainer branch (not rebased, so don't use `linux-next` for example).
+    - if changes were required, use `BACKPORT: FROMGIT:`
+    - Example:
+        - if the commit message in the maintainer tree is
+```
+        important patch from upstream
+
+        This is the detailed description of the important patch
+
+        Signed-off-by: Fred Jones <fred.jones@foo.org>
+```
+>- then Joe Smith would upload the patch for the common kernel as
+```
+        FROMGIT: important patch from upstream
+
+        This is the detailed description of the important patch
+
+        Signed-off-by: Fred Jones <fred.jones@foo.org>
+
+        Bug: 135791357
+        (cherry picked from commit 878a2fd9de10b03d11d2f622250285c7e63deace
+         https://git.kernel.org/pub/scm/linux/kernel/git/foo/bar.git test-branch)
+        Change-Id: I4caaaa566ea080fa148c5e768bb1a0b6f7201c01
+        Signed-off-by: Joe Smith <joe.smith@foo.org>
+```
+
+
+- If the patch has been submitted to LKML, but not accepted into any maintainer tree
+    - tag the patch subject with `FROMLIST:`
+    - add a `Link:` tag with a link to the submittal on lore.kernel.org
+    - add a `Bug:` tag with the Android bug (required for patches not accepted into
+a maintainer tree)
+    - if changes were required, use `BACKPORT: FROMLIST:`
+    - Example:
+```
+        FROMLIST: important patch from upstream
+
+        This is the detailed description of the important patch
+
+        Signed-off-by: Fred Jones <fred.jones@foo.org>
+
+        Bug: 135791357
+        Link: https://lore.kernel.org/lkml/20190619171517.GA17557@someone.com/
+        Change-Id: I4caaaa566ea080fa148c5e768bb1a0b6f7201c01
+        Signed-off-by: Joe Smith <joe.smith@foo.org>
+```
+
+## Requirements for Android-specific patches: `ANDROID:`
+
+- If the patch is fixing a bug to Android-specific code
+    - tag the patch subject with `ANDROID:`
+    - add a `Fixes:` tag that cites the patch with the bug
+    - Example:
+```
+        ANDROID: fix android-specific bug in foobar.c
+
+        This is the detailed description of the important fix
+
+        Fixes: 1234abcd2468 ("foobar: add cool feature")
+        Change-Id: I4caaaa566ea080fa148c5e768bb1a0b6f7201c01
+        Signed-off-by: Joe Smith <joe.smith@foo.org>
+```
+
+- If the patch is a new feature
+    - tag the patch subject with `ANDROID:`
+    - add a `Bug:` tag with the Android bug (required for android-specific features)
+

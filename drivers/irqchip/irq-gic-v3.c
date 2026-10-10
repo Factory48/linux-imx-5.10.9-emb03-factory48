@@ -50,20 +50,6 @@ struct redist_region {
 	bool			single_redist;
 };
 
-struct gic_chip_data {
-	struct fwnode_handle	*fwnode;
-	void __iomem		*dist_base;
-	struct redist_region	*redist_regions;
-	struct rdists		rdists;
-	struct irq_domain	*domain;
-	u64			redist_stride;
-	u32			nr_redist_regions;
-	u64			flags;
-	bool			has_rss;
-	unsigned int		ppi_nr;
-	struct partition_desc	**ppi_descs;
-};
-
 static struct gic_chip_data gic_data __read_mostly;
 static DEFINE_STATIC_KEY_TRUE(supports_deactivate_key);
 
@@ -106,6 +92,27 @@ EXPORT_SYMBOL(gic_pmr_sync);
 DEFINE_STATIC_KEY_FALSE(gic_nonsecure_priorities);
 EXPORT_SYMBOL(gic_nonsecure_priorities);
 
+/*
+ * When the Non-secure world has access to group 0 interrupts (as a
+ * consequence of SCR_EL3.FIQ == 0), reading the ICC_RPR_EL1 register will
+ * return the Distributor's view of the interrupt priority.
+ *
+ * When GIC security is enabled (GICD_CTLR.DS == 0), the interrupt priority
+ * written by software is moved to the Non-secure range by the Distributor.
+ *
+ * If both are true (which is when gic_nonsecure_priorities gets enabled),
+ * we need to shift down the priority programmed by software to match it
+ * against the value returned by ICC_RPR_EL1.
+ */
+#define GICD_INT_RPR_PRI(priority)					\
+	({								\
+		u32 __priority = (priority);				\
+		if (static_branch_unlikely(&gic_nonsecure_priorities))	\
+			__priority = 0x80 | (__priority >> 1);		\
+									\
+		__priority;						\
+	})
+
 /* ppi_nmi_refs[n] == number of cpus having ppi[n + 16] set as NMI */
 static refcount_t *ppi_nmi_refs;
 
@@ -129,6 +136,10 @@ enum gic_intid_range {
 	LPI_RANGE,
 	__INVALID_RANGE__
 };
+
+#ifdef CONFIG_GIC_GENTLE_CONFIG
+static u64 gic_mpidr_to_affinity(unsigned long mpidr);
+#endif
 
 static enum gic_intid_range __get_intid_range(irq_hw_number_t hwirq)
 {
@@ -558,6 +569,9 @@ static int gic_set_type(struct irq_data *d, unsigned int type)
 	void __iomem *base;
 	u32 offset, index;
 	int ret;
+#ifdef CONFIG_GIC_GENTLE_CONFIG
+	u64 affinity;
+#endif
 
 	range = get_intid_range(d);
 
@@ -577,6 +591,16 @@ static int gic_set_type(struct irq_data *d, unsigned int type)
 		base = gic_data.dist_base;
 		rwp_wait = gic_dist_wait_for_rwp;
 	}
+
+#ifdef CONFIG_GIC_GENTLE_CONFIG
+	/* In a SoC running multiple OSes on ARM clusters sharing the same GIC,
+	 * set the affinity of the SPI here.
+	 * This allows to set the affinity to only the interrupts
+	 * registered by the cluster.
+	 */
+	affinity = gic_mpidr_to_affinity(cpu_logical_map(smp_processor_id()));
+	gic_write_irouter(affinity, base + GICD_IROUTER + irq * 8);
+#endif
 
 	offset = convert_offset_index(d, GICD_ICFGR, &index);
 
@@ -648,14 +672,52 @@ static inline void gic_handle_nmi(u32 irqnr, struct pt_regs *regs)
 		nmi_exit();
 }
 
+static u32 do_read_iar(struct pt_regs *regs)
+{
+	u32 iar;
+
+	if (gic_supports_nmi() && unlikely(!interrupts_enabled(regs))) {
+		u64 pmr;
+
+		/*
+		 * We were in a context with IRQs disabled. However, the
+		 * entry code has set PMR to a value that allows any
+		 * interrupt to be acknowledged, and not just NMIs. This can
+		 * lead to surprising effects if the NMI has been retired in
+		 * the meantime, and that there is an IRQ pending. The IRQ
+		 * would then be taken in NMI context, something that nobody
+		 * wants to debug twice.
+		 *
+		 * Until we sort this, drop PMR again to a level that will
+		 * actually only allow NMIs before reading IAR, and then
+		 * restore it to what it was.
+		 */
+		pmr = gic_read_pmr();
+		gic_pmr_mask_irqs();
+		isb();
+
+		iar = gic_read_iar();
+
+		gic_write_pmr(pmr);
+	} else {
+		iar = gic_read_iar();
+	}
+
+	return iar;
+}
+
 static asmlinkage void __exception_irq_entry gic_handle_irq(struct pt_regs *regs)
 {
 	u32 irqnr;
 
-	irqnr = gic_read_iar();
+	irqnr = do_read_iar(regs);
+
+	/* Check for special IDs first */
+	if ((irqnr >= 1020 && irqnr <= 1023))
+		return;
 
 	if (gic_supports_nmi() &&
-	    unlikely(gic_read_rpr() == GICD_INT_NMI_PRI)) {
+	    unlikely(gic_read_rpr() == GICD_INT_RPR_PRI(GICD_INT_NMI_PRI))) {
 		gic_handle_nmi(irqnr, regs);
 		return;
 	}
@@ -664,10 +726,6 @@ static asmlinkage void __exception_irq_entry gic_handle_irq(struct pt_regs *regs
 		gic_pmr_mask_irqs();
 		gic_arch_enable_irqs();
 	}
-
-	/* Check for special IDs first */
-	if ((irqnr >= 1020 && irqnr <= 1023))
-		return;
 
 	if (static_branch_likely(&supports_deactivate_key))
 		gic_write_eoir(irqnr);
@@ -722,9 +780,25 @@ static bool gic_has_group0(void)
 static void __init gic_dist_init(void)
 {
 	unsigned int i;
+#ifndef CONFIG_GIC_GENTLE_CONFIG
 	u64 affinity;
+#endif
 	void __iomem *base = gic_data.dist_base;
 	u32 val;
+
+#ifdef CONFIG_GIC_GENTLE_CONFIG
+       /* In a SoC running multiple OSes on ARM clusters sharing the same GIC,
+        * we take care of not re-configuring the distributor
+        * when another OS already did it, else this could interfere
+        * with the on-going interrupts directed to the other OS.
+        */
+       u32 gicd_ctlr = readl_relaxed(base + GICD_CTLR);
+
+       if (gicd_ctlr & (GICD_CTLR_ENABLE_G1A | GICD_CTLR_ENABLE_G1)) {
+               printk(KERN_INFO "GIC Distributor already configured: skip gic_dist_init\n");
+               return;
+       }
+#endif
 
 	/* Disable the distributor */
 	writel_relaxed(0, base + GICD_CTLR);
@@ -766,6 +840,14 @@ static void __init gic_dist_init(void)
 	/* Enable distributor with ARE, Group1 */
 	writel_relaxed(val, base + GICD_CTLR);
 
+#ifndef CONFIG_GIC_GENTLE_CONFIG
+	/* In a SoC running multiple OSes on ARM clusters sharing the same GIC,
+	 * do not set the affinity to all interrupts as this
+	 * would conflict with the other cluster's GIC configuration.
+	 * This is now done in function gic_set_type() (called by request_irq)
+	 * which allows to limit this to the interrupts registered by the
+	 * cluster.
+	 */
 	/*
 	 * Set all global interrupts to the boot CPU only. ARE must be
 	 * enabled.
@@ -780,6 +862,7 @@ static void __init gic_dist_init(void)
 		trace_android_vh_gic_v3_affinity_init(i, GICD_IROUTERnE, &affinity);
 		gic_write_irouter(affinity, base + GICD_IROUTERnE + i * 8);
 	}
+#endif
 }
 
 static int gic_iterate_rdists(int (*fn)(struct redist_region *, void __iomem *))
@@ -1211,7 +1294,7 @@ static int gic_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 	reg = gic_dist_base(d) + offset + (index * 8);
 	val = gic_mpidr_to_affinity(cpu_logical_map(cpu));
 
-	trace_android_vh_gic_v3_set_affinity(d, mask_val, &val);
+	trace_android_rvh_gic_v3_set_affinity(d, mask_val, &val, force, gic_dist_base(d));
 	gic_write_irouter(val, reg);
 
 	/*
@@ -1267,10 +1350,11 @@ static inline void gic_cpu_pm_init(void) { }
 #endif /* CONFIG_CPU_PM */
 
 #ifdef CONFIG_PM
-static void gic_resume(void)
+void gic_resume(void)
 {
-	trace_android_vh_gic_resume(gic_data.domain, gic_data.dist_base);
+	trace_android_vh_gic_resume(&gic_data);
 }
+EXPORT_SYMBOL_GPL(gic_resume);
 
 static struct syscore_ops gic_syscore_ops = {
 	.resume = gic_resume,
@@ -1283,6 +1367,7 @@ static void gic_syscore_init(void)
 
 #else
 static inline void gic_syscore_init(void) { }
+void gic_resume(void) { }
 #endif
 
 

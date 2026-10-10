@@ -209,17 +209,9 @@ void brcmf_sdiod_change_state(struct brcmf_sdio_dev *sdiodev,
 		brcmf_bus_change_state(sdiodev->bus_if, BRCMF_BUS_DOWN);
 		break;
 	case BRCMF_SDIOD_DOWN:
-		/* transition from DOWN to DATA means bus interface is up.
-		 * Publish DATA first: BUS_UP lets waiters (wiphy resume) send
-		 * control frames, which the SDIO layer only accepts in DATA.
-		 * Pairs with smp_rmb() in brcmf_cfg80211_resume().
-		 */
-		if (state == BRCMF_SDIOD_DATA) {
-			sdiodev->state = state;
-			smp_wmb();
+		/* transition from DOWN to DATA means bus interface is up */
+		if (state == BRCMF_SDIOD_DATA)
 			brcmf_bus_change_state(sdiodev->bus_if, BRCMF_BUS_UP);
-			return;
-		}
 		break;
 	default:
 		break;
@@ -1225,13 +1217,9 @@ static struct sdio_driver brcmf_sdmmc_driver = {
 	},
 };
 
-void brcmf_sdio_register(void)
+int brcmf_sdio_register(void)
 {
-	int ret;
-
-	ret = sdio_register_driver(&brcmf_sdmmc_driver);
-	if (ret)
-		brcmf_err("sdio_register_driver failed: %d\n", ret);
+	return sdio_register_driver(&brcmf_sdmmc_driver);
 }
 
 void brcmf_sdio_exit(void)

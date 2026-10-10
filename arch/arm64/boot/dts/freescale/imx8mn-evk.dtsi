@@ -28,14 +28,6 @@
 		reg = <0x0 0x40000000 0 0x80000000>;
 	};
 
-	modem_reset: modem-reset {
-		compatible = "gpio-reset";
-		reset-gpios = <&gpio2 6 GPIO_ACTIVE_LOW>;
-		reset-delay-us = <2000>;
-		reset-post-delay-ms = <40>;
-		#reset-cells = <0>;
-	};
-
 	ir_recv: ir-receiver {
 		compatible = "gpio-ir-receiver";
 		gpios = <&gpio1 13 GPIO_ACTIVE_LOW>;
@@ -184,7 +176,7 @@
 		#size-cells = <1>;
 		compatible = "jedec,spi-nor";
 		spi-max-frequency = <80000000>;
-		spi-tx-bus-width = <4>;
+		spi-tx-bus-width = <1>;
 		spi-rx-bus-width = <4>;
 	};
 };
@@ -206,7 +198,7 @@
 	status = "okay";
 
 	adv_bridge: adv7535@3d {
-		compatible = "adi,adv7533";
+		compatible = "adi,adv7535";
 		reg = <0x3d>;
 		adi,addr-cec = <0x3b>;
 		adi,dsi-lanes = <4>;
@@ -298,7 +290,7 @@
 	ak5558: ak5558@13 {
 		compatible = "asahi-kasei,ak5558";
 		reg = <0x13>;
-		reset-gpios = <&pca6416 3 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&pca6416 3 GPIO_ACTIVE_LOW>;
 		AVDD-supply = <&reg_audio_board>;
 		DVDD-supply = <&reg_audio_board>;
 		status = "disabled";
@@ -307,7 +299,7 @@
 	ak4497: ak4497@11 {
 		compatible = "asahi-kasei,ak4497";
 		reg = <0x11>;
-		reset-gpios = <&pca6416 5 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&pca6416 5 GPIO_ACTIVE_LOW>;
 		AVDD-supply = <&reg_audio_board>;
 		DVDD-supply = <&reg_audio_board>;
 		status = "disabled";
@@ -349,6 +341,7 @@
 };
 
 &lcdif {
+	trusty;
 	status = "okay";
 };
 
@@ -449,7 +442,6 @@
 	assigned-clocks = <&clk IMX8MN_CLK_UART1>;
 	assigned-clock-parents = <&clk IMX8MN_SYS_PLL1_80M>;
 	fsl,uart-has-rtscts;
-	resets = <&modem_reset>;
 	status = "okay";
 };
 
@@ -476,19 +468,18 @@
 	pinctrl-1 = <&pinctrl_usdhc1_100mhz>, <&pinctrl_wlan>;
 	pinctrl-2 = <&pinctrl_usdhc1_200mhz>, <&pinctrl_wlan>;
 	bus-width = <4>;
-	pm-ignore-notify;
 	keep-power-in-suspend;
 	non-removable;
-	cap-power-off-card;
+	wakeup-source;
 	/delete-property/ vmmc-supply;
 	mmc-pwrseq = <&usdhc1_pwrseq>;
+	fsl,sdio-interrupt-enabled;
 	status = "okay";
 
-	brcmf: bcrmf@1 {
-		reg = <1>;
-		compatible = "brcm,bcm4329-fmac";
+	wifi_wake_host {
+		compatible = "nxp,wifi-wake-host";
 		interrupt-parent = <&gpio2>;
-		interrupts = <9 IRQ_TYPE_LEVEL_HIGH>;
+		interrupts = <9 IRQ_TYPE_LEVEL_LOW>;
 		interrupt-names = "host-wake";
 	};
 };
@@ -499,6 +490,7 @@
 	srp-disable;
 	adp-disable;
 	usb-role-switch;
+	disable-over-current;
 	samsung,picophy-pre-emp-curr-control = <3>;
 	samsung,picophy-dc-vol-level-adjust = <7>;
 	status = "okay";
@@ -726,7 +718,6 @@
 			MX8MN_IOMUXC_UART1_TXD_UART1_DCE_TX	0x140
 			MX8MN_IOMUXC_UART3_RXD_UART1_DCE_CTS_B	0x140
 			MX8MN_IOMUXC_UART3_TXD_UART1_DCE_RTS_B	0x140
-			MX8MN_IOMUXC_SD1_DATA4_GPIO2_IO6	0x19
 		>;
 	};
 
@@ -884,7 +875,7 @@
 	pinctrl_wlan: wlangrp {
 		fsl,pins = <
 			MX8MN_IOMUXC_GPIO1_IO00_ANAMIX_REF_CLK_32K	0x141
-			MX8MN_IOMUXC_SD1_DATA7_GPIO2_IO9		0x111
+			MX8MN_IOMUXC_SD1_DATA7_GPIO2_IO9		0x159
 		>;
 	};
 };

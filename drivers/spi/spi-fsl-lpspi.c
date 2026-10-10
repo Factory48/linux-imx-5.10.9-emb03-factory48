@@ -200,7 +200,7 @@ static int lpspi_prepare_xfer_hardware(struct spi_controller *controller)
 				spi_controller_get_devdata(controller);
 	int ret;
 
-	ret = pm_runtime_get_sync(fsl_lpspi->dev);
+	ret = pm_runtime_resume_and_get(fsl_lpspi->dev);
 	if (ret < 0) {
 		dev_err(fsl_lpspi->dev, "failed to enable clock\n");
 		return ret;
@@ -301,6 +301,12 @@ static int fsl_lpspi_set_bitrate(struct fsl_lpspi_data *fsl_lpspi)
 	u8 prescale;
 
 	perclk_rate = clk_get_rate(fsl_lpspi->clk_per);
+
+	if (!config.speed_hz) {
+		dev_err(fsl_lpspi->dev,
+			"error: the transmission speed provided is 0!\n");
+		return -EINVAL;
+	}
 
 	if (config.speed_hz > perclk_rate / 2) {
 		dev_err(fsl_lpspi->dev,

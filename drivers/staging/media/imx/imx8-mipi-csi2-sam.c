@@ -259,6 +259,25 @@
 #define DISP_MIX_GASKET_0_HSIZE			0x04
 #define DISP_MIX_GASKET_0_VSIZE			0x08
 
+#define ISP_DEWARP_CTRL				0x138
+#define ISP_DEWARP_CTRL_ISP_0_DISABLE		BIT(0)
+#define ISP_DEWARP_CTRL_ISP_1_DISABLE		BIT(1)
+#define ISP_DEWARP_CTRL_ISP_0_DATA_TYPE(x)	(((x) & (0x3F)) << 3)
+#define ISP_DEWARP_CTRL_ISP_0_LEFT_JUST_MODE	BIT(9)
+#define ISP_DEWARP_CTRL_ISP_1_DATA_TYPE(x)	(((x) & (0x3F)) << 13)
+#define ISP_DEWARP_CTRL_ISP_1_LEFT_JUST_MODE	BIT(19)
+#define ISP_DEWARP_CTRL_ID_MODE(x)		(((x) & (0x3)) << 23)
+#define ISP_DEWARP_CTRL_DATA_TYPE_RAW6		0x28
+#define ISP_DEWARP_CTRL_DATA_TYPE_RAW7		0x29
+#define ISP_DEWARP_CTRL_DATA_TYPE_RAW8		0x2a
+#define ISP_DEWARP_CTRL_DATA_TYPE_RAW10		0x2b
+#define ISP_DEWARP_CTRL_DATA_TYPE_RAW12		0x2c
+#define ISP_DEWARP_CTRL_DATA_TYPE_RAW14		0x2d
+#define ISP_DEWARP_CTRL_ID_MODE_DISABLE		0x0
+#define ISP_DEWARP_CTRL_ID_MODE_012		0x1
+#define ISP_DEWARP_CTRL_ID_MODE_01		0x2
+#define ISP_DEWARP_CTRL_ID_MODE_02		0x3
+
 struct csi_state;
 struct mipi_csis_event {
 	u32 mask;
@@ -328,6 +347,7 @@ struct mipi_csis_pdata {
 	struct mipi_csis_rst_ops *rst_ops;
 	struct mipi_csis_gate_clk_ops *gclk_ops;
 	struct mipi_csis_phy_ops *phy_ops;
+	bool use_mix_gpr;
 };
 
 static const struct mipi_csis_event mipi_csis_events[] = {
@@ -1644,6 +1664,7 @@ static struct mipi_csis_pdata mipi_csis_imx8mn_pdata = {
 	.rst_ops  = &imx8mn_rst_ops,
 	.gclk_ops = &imx8mn_gclk_ops,
 	.phy_ops  = &imx8mn_phy_ops,
+	.use_mix_gpr = false,
 };
 
 /*
@@ -1656,14 +1677,16 @@ static int mipi_csis_imx8mp_parse_resets(struct csi_state *state)
 
 	reset = devm_reset_control_get(dev, "csi_rst_pclk");
 	if (IS_ERR(reset)) {
-		dev_err(dev, "Failed to get csi pclk reset control\n");
+		if (PTR_ERR(reset) != -EPROBE_DEFER)
+			dev_err(dev, "Failed to get csi pclk reset control\n");
 		return PTR_ERR(reset);
 	}
 	state->csi_rst_pclk = reset;
 
 	reset = devm_reset_control_get(dev, "csi_rst_aclk");
 	if (IS_ERR(reset)) {
-		dev_err(dev, "Failed to get csi aclk reset control\n");
+		if (PTR_ERR(reset) != -EPROBE_DEFER)
+			dev_err(dev, "Failed to get csi aclk reset control\n");
 		return PTR_ERR(reset);
 	}
 	state->csi_rst_aclk = reset;
@@ -1717,14 +1740,16 @@ static int mipi_csis_imx8mp_gclk_get(struct csi_state *state)
 
 	state->csi_pclk = devm_clk_get(dev, "media_blk_csi_pclk");
 	if (IS_ERR(state->csi_pclk)) {
-		dev_err(dev, "Failed to get media csi pclk\n");
-		return -ENODEV;
+		if (PTR_ERR(state->csi_pclk) != -EPROBE_DEFER)
+			dev_err(dev, "Failed to get media csi pclk\n");
+		return PTR_ERR(state->csi_pclk);
 	}
 
 	state->csi_aclk = devm_clk_get(dev, "media_blk_csi_aclk");
 	if (IS_ERR(state->csi_aclk)) {
-		dev_err(dev, "Failed to get media csi aclk\n");
-		return -ENODEV;
+		if (PTR_ERR(state->csi_pclk) != -EPROBE_DEFER)
+			dev_err(dev, "Failed to get media csi aclk\n");
+		return PTR_ERR(state->csi_pclk);
 	}
 
 	return 0;
@@ -1765,11 +1790,20 @@ static struct mipi_csis_gate_clk_ops imx8mp_gclk_ops = {
 
 static void mipi_csis_imx8mp_phy_reset(struct csi_state *state)
 {
+	u32 val;
+
 	mipi_csis_imx8mn_phy_reset(state);
 
 	/* temporary place */
-	if (state->mix_gpr)
-		regmap_write(state->mix_gpr, 0x138, 0x8d8360);
+	if (state->mix_gpr) {
+		val  = ISP_DEWARP_CTRL_ISP_0_DATA_TYPE(ISP_DEWARP_CTRL_DATA_TYPE_RAW12);
+		val |= ISP_DEWARP_CTRL_ISP_1_DATA_TYPE(ISP_DEWARP_CTRL_DATA_TYPE_RAW12);
+		val |= ISP_DEWARP_CTRL_ID_MODE(ISP_DEWARP_CTRL_ID_MODE_012);
+		val |= ISP_DEWARP_CTRL_ISP_0_LEFT_JUST_MODE;
+		val |= ISP_DEWARP_CTRL_ISP_1_LEFT_JUST_MODE;
+
+		regmap_write(state->mix_gpr, ISP_DEWARP_CTRL, val);
+	}
 }
 
 static struct mipi_csis_phy_ops imx8mp_phy_ops = {
@@ -1780,6 +1814,7 @@ static struct mipi_csis_pdata mipi_csis_imx8mp_pdata = {
 	.rst_ops  = &imx8mp_rst_ops,
 	.gclk_ops = &imx8mp_gclk_ops,
 	.phy_ops  = &imx8mp_phy_ops,
+	.use_mix_gpr = true,
 };
 
 static int mipi_csis_probe(struct platform_device *pdev)
@@ -1830,15 +1865,15 @@ static int mipi_csis_probe(struct platform_device *pdev)
 	}
 
 	ret = disp_mix_sft_parse_resets(state);
-	if (ret < 0) {
-		dev_err(dev, "Can not parse reset control\n");
+	if (ret < 0)
 		return ret;
-	}
 
-	state->mix_gpr = syscon_regmap_lookup_by_phandle(dev->of_node, "gpr");
-	if (IS_ERR(state->mix_gpr)) {
-		dev_warn(dev, "failed to get mix gpr\n");
-		state->mix_gpr = NULL;
+	if (state->pdata->use_mix_gpr) {
+		state->mix_gpr = syscon_regmap_lookup_by_phandle(dev->of_node, "gpr");
+		if (IS_ERR(state->mix_gpr)) {
+			dev_err(dev, "failed to get mix gpr\n");
+			return PTR_ERR(state->mix_gpr);
+		}
 	}
 
 	mem_res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
@@ -1870,7 +1905,8 @@ static int mipi_csis_probe(struct platform_device *pdev)
 	disp_mix_sft_rstn(state, false);
 	mipi_csis_phy_reset(state);
 
-	/*mipi_csis_clk_disable(state);*/
+	disp_mix_clks_enable(state, false);
+	mipi_csis_clk_disable(state);
 
 	ret = devm_request_irq(dev, state->irq, mipi_csis_irq_handler, 0,
 			       dev_name(dev), state);

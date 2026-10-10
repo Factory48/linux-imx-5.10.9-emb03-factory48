@@ -70,6 +70,13 @@ struct fscrypt_operations {
 	int (*get_num_devices)(struct super_block *sb);
 	void (*get_devices)(struct super_block *sb,
 			    struct request_queue **devs);
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
+
+	ANDROID_OEM_DATA_ARRAY(1, 4);
 };
 
 static inline struct fscrypt_info *fscrypt_get_info(const struct inode *inode)
@@ -253,6 +260,7 @@ int __fscrypt_encrypt_symlink(struct inode *inode, const char *target,
 const char *fscrypt_get_symlink(struct inode *inode, const void *caddr,
 				unsigned int max_size,
 				struct delayed_call *done);
+int fscrypt_symlink_getattr(const struct path *path, struct kstat *stat);
 static inline void fscrypt_set_ops(struct super_block *sb,
 				   const struct fscrypt_operations *s_cop)
 {
@@ -583,6 +591,12 @@ static inline const char *fscrypt_get_symlink(struct inode *inode,
 	return ERR_PTR(-EOPNOTSUPP);
 }
 
+static inline int fscrypt_symlink_getattr(const struct path *path,
+					  struct kstat *stat)
+{
+	return -EOPNOTSUPP;
+}
+
 static inline void fscrypt_set_ops(struct super_block *sb,
 				   const struct fscrypt_operations *s_cop)
 {
@@ -611,8 +625,7 @@ bool fscrypt_mergeable_bio_bh(struct bio *bio,
 
 bool fscrypt_dio_supported(struct kiocb *iocb, struct iov_iter *iter);
 
-int fscrypt_limit_dio_pages(const struct inode *inode, loff_t pos,
-			    int nr_pages);
+u64 fscrypt_limit_io_blocks(const struct inode *inode, u64 lblk, u64 nr_blocks);
 
 #else /* CONFIG_FS_ENCRYPTION_INLINE_CRYPT */
 
@@ -651,10 +664,10 @@ static inline bool fscrypt_dio_supported(struct kiocb *iocb,
 	return !fscrypt_needs_contents_encryption(inode);
 }
 
-static inline int fscrypt_limit_dio_pages(const struct inode *inode, loff_t pos,
-					  int nr_pages)
+static inline u64 fscrypt_limit_io_blocks(const struct inode *inode, u64 lblk,
+					  u64 nr_blocks)
 {
-	return nr_pages;
+	return nr_blocks;
 }
 #endif /* !CONFIG_FS_ENCRYPTION_INLINE_CRYPT */
 

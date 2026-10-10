@@ -1,7 +1,0 @@
-config SND_SOC_EMB03_ES8316
-	tristate "EMB03 factory PCM ES8316 candidate"
-	depends on SND_SOC && I2C && OF && GPIOLIB && COMMON_CLK
-	depends on !SND_SOC_ES8316
-	select REGMAP_I2C
-	select SND_SOC_FSL_SAI
-	select SND_SOC_IMX_PCM_DMA

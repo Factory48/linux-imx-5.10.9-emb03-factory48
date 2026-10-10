@@ -42,6 +42,7 @@
 #include <linux/of_platform.h>
 #include <linux/pm_runtime.h>
 #include <linux/busfreq-imx.h>
+#include <linux/platform_data/dma-imx.h>
 
 #include <sound/core.h>
 #include <sound/pcm.h>
@@ -290,6 +291,7 @@ struct fsl_ssi {
 	u32 dma_maxburst;
 
 	struct mutex ac97_reg_lock;
+	struct sdma_audio_config audio_config[2];
 };
 
 /*
@@ -863,15 +865,23 @@ static int fsl_ssi_hw_params(struct snd_pcm_substream *substream,
 
 	if (ssi->use_dyna_fifo) {
 		if (channels == 1) {
-			ssi->dma_params_tx.fifo_num  = 1;
-			ssi->dma_params_rx.fifo_num  = 1;
+			ssi->audio_config[0].dst_fifo_num = 1;
+			ssi->audio_config[1].src_fifo_num = 1;
+			ssi->dma_params_tx.peripheral_config = &ssi->audio_config[0];
+			ssi->dma_params_tx.peripheral_size = sizeof(ssi->audio_config[0]);
+			ssi->dma_params_rx.peripheral_config = &ssi->audio_config[1];
+			ssi->dma_params_rx.peripheral_size = sizeof(ssi->audio_config[1]);
 			vals[RX].srcr &= ~SSI_SRCR_RFEN1;
 			vals[TX].stcr &= ~SSI_STCR_TFEN1;
 			vals[RX].scr  &= ~SSI_SCR_TCH_EN;
 			vals[TX].scr  &= ~SSI_SCR_TCH_EN;
 		} else {
-			ssi->dma_params_tx.fifo_num  = 2;
-			ssi->dma_params_rx.fifo_num  = 2;
+			ssi->audio_config[0].dst_fifo_num = 2;
+			ssi->audio_config[1].src_fifo_num = 2;
+			ssi->dma_params_tx.peripheral_config = &ssi->audio_config[0];
+			ssi->dma_params_tx.peripheral_size = sizeof(ssi->audio_config[0]);
+			ssi->dma_params_rx.peripheral_config = &ssi->audio_config[1];
+			ssi->dma_params_rx.peripheral_size = sizeof(ssi->audio_config[1]);
 			vals[RX].srcr |= SSI_SRCR_RFEN1;
 			vals[TX].stcr |= SSI_STCR_TFEN1;
 			vals[RX].scr  |= SSI_SCR_TCH_EN;
@@ -900,6 +910,7 @@ static int fsl_ssi_hw_free(struct snd_pcm_substream *substream,
 static int _fsl_ssi_set_dai_fmt(struct fsl_ssi *ssi, unsigned int fmt)
 {
 	u32 strcr = 0, scr = 0, stcr, srcr, mask;
+	unsigned int slots;
 
 	ssi->dai_fmt = fmt;
 
@@ -931,10 +942,11 @@ static int _fsl_ssi_set_dai_fmt(struct fsl_ssi *ssi, unsigned int fmt)
 			return -EINVAL;
 		}
 
+		slots = ssi->slots ? : 2;
 		regmap_update_bits(ssi->regs, REG_SSI_STCCR,
-				   SSI_SxCCR_DC_MASK, SSI_SxCCR_DC(2));
+				   SSI_SxCCR_DC_MASK, SSI_SxCCR_DC(slots));
 		regmap_update_bits(ssi->regs, REG_SSI_SRCCR,
-				   SSI_SxCCR_DC_MASK, SSI_SxCCR_DC(2));
+				   SSI_SxCCR_DC_MASK, SSI_SxCCR_DC(slots));
 
 		/* Data on rising edge of bclk, frame low, 1clk before data */
 		strcr |= SSI_STCR_TFSI | SSI_STCR_TSCKP | SSI_STCR_TEFS;
@@ -1395,7 +1407,7 @@ static int fsl_ssi_imx_probe(struct platform_device *pdev,
 		if (ret)
 			goto error_pcm;
 	} else {
-		ret = imx_pcm_platform_register(&pdev->dev);
+		ret = imx_pcm_dma_init(pdev, IMX_SSI_DMABUF_SIZE);
 		if (ret)
 			goto error_pcm;
 	}

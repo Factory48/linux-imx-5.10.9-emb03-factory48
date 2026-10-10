@@ -31,7 +31,7 @@
 #include <uapi/linux/dma-buf.h>
 #include <uapi/linux/magic.h>
 
-static inline int is_dma_buf_file(struct file *);
+#include "dma-buf-sysfs-stats.h"
 
 struct dma_buf_list {
 	struct list_head head;
@@ -39,6 +39,31 @@ struct dma_buf_list {
 };
 
 static struct dma_buf_list db_list;
+static DEFINE_MUTEX(dev_lock);
+
+/*
+ * This function helps in traversing the db_list and calls the
+ * callback function which can extract required info out of each
+ * dmabuf.
+ */
+int get_each_dmabuf(int (*callback)(const struct dma_buf *dmabuf,
+		    void *private), void *private)
+{
+	struct dma_buf *buf;
+	int ret = mutex_lock_interruptible(&db_list.lock);
+
+	if (ret)
+		return ret;
+
+	list_for_each_entry(buf, &db_list.head, list_node) {
+		ret = callback(buf, private);
+		if (ret)
+			break;
+	}
+	mutex_unlock(&db_list.lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(get_each_dmabuf);
 
 static char *dmabuffs_dname(struct dentry *dentry, char *buffer, int buflen)
 {
@@ -76,6 +101,7 @@ static void dma_buf_release(struct dentry *dentry)
 	 */
 	BUG_ON(dmabuf->cb_shared.active || dmabuf->cb_excl.active);
 
+	dma_buf_stats_teardown(dmabuf);
 	dmabuf->ops->release(dmabuf);
 
 	if (dmabuf->resv == (struct dma_resv *)&dmabuf[1])
@@ -325,6 +351,25 @@ out:
 	return events;
 }
 
+static long _dma_buf_set_name(struct dma_buf *dmabuf, const char *name)
+{
+	long ret = 0;
+
+	dma_resv_lock(dmabuf->resv, NULL);
+	if (!list_empty(&dmabuf->attachments)) {
+		ret = -EBUSY;
+		goto out_unlock;
+	}
+	spin_lock(&dmabuf->name_lock);
+	kfree(dmabuf->name);
+	dmabuf->name = name;
+	spin_unlock(&dmabuf->name_lock);
+
+out_unlock:
+	dma_resv_unlock(dmabuf->resv);
+	return ret;
+}
+
 /**
  * dma_buf_set_name - Set a name to a specific dma_buf to track the usage.
  * The name of the dma-buf buffer can only be set when the dma-buf is not
@@ -340,7 +385,23 @@ out:
  * devices, return -EBUSY.
  *
  */
-static long dma_buf_set_name(struct dma_buf *dmabuf, const char __user *buf)
+long dma_buf_set_name(struct dma_buf *dmabuf, const char *name)
+{
+	long ret = 0;
+	char *buf = kstrndup(name, DMA_BUF_NAME_LEN, GFP_KERNEL);
+
+	if (!buf)
+		return -ENOMEM;
+
+	ret = _dma_buf_set_name(dmabuf, buf);
+	if (ret)
+		kfree(buf);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(dma_buf_set_name);
+
+static long dma_buf_set_name_user(struct dma_buf *dmabuf, const char __user *buf)
 {
 	char *name = strndup_user(buf, DMA_BUF_NAME_LEN);
 	long ret = 0;
@@ -348,20 +409,16 @@ static long dma_buf_set_name(struct dma_buf *dmabuf, const char __user *buf)
 	if (IS_ERR(name))
 		return PTR_ERR(name);
 
-	dma_resv_lock(dmabuf->resv, NULL);
-	if (!list_empty(&dmabuf->attachments)) {
-		ret = -EBUSY;
+	ret = _dma_buf_set_name(dmabuf, name);
+	if (ret)
 		kfree(name);
-		goto out_unlock;
-	}
-	spin_lock(&dmabuf->name_lock);
-	kfree(dmabuf->name);
-	dmabuf->name = name;
-	spin_unlock(&dmabuf->name_lock);
 
-out_unlock:
-	dma_resv_unlock(dmabuf->resv);
 	return ret;
+}
+
+static void dma_buf_ioc_phy_release(struct device *dev)
+{
+	return;
 }
 
 static long dma_buf_ioctl(struct file *file,
@@ -385,12 +442,24 @@ static long dma_buf_ioctl(struct file *file,
 			return -EFAULT;
 		}
 		memset(&dev, 0, sizeof(dev));
+		mutex_lock(&dev_lock);
 		device_initialize(&dev);
 		dev.coherent_dma_mask = DMA_BIT_MASK(64);
 		dev.dma_mask = &dev.coherent_dma_mask;
+		dev.parent = NULL;
+		dev.release = dma_buf_ioc_phy_release;
+		dev_set_name(&dev, "dma_phy");
+		ret  = device_add(&dev);
+		if (ret < 0) {
+			put_device(&dev);
+			return ret;
+		}
 		arch_setup_dma_ops(&dev, 0, 0, NULL, false);
 		attachment = dma_buf_attach(dmabuf, &dev);
 		if (!attachment || IS_ERR(attachment)) {
+			device_del(&dev);
+			put_device(&dev);
+			mutex_unlock(&dev_lock);
 			return -EFAULT;
 		}
 
@@ -401,6 +470,9 @@ static long dma_buf_ioctl(struct file *file,
 					DMA_BIDIRECTIONAL);
 		}
 		dma_buf_detach(dmabuf, attachment);
+		device_del(&dev);
+		put_device(&dev);
+		mutex_unlock(&dev_lock);
 		if (copy_to_user((void __user *) arg, &phys, sizeof(phys)))
 			return -EFAULT;
 		return 0;
@@ -435,7 +507,7 @@ static long dma_buf_ioctl(struct file *file,
 
 	case DMA_BUF_SET_NAME_A:
 	case DMA_BUF_SET_NAME_B:
-		return dma_buf_set_name(dmabuf, (const char __user *)arg);
+		return dma_buf_set_name_user(dmabuf, (const char __user *)arg);
 
 	default:
 		return -ENOTTY;
@@ -469,10 +541,11 @@ static const struct file_operations dma_buf_fops = {
 /*
  * is_dma_buf_file - Check if struct file* is associated with dma_buf
  */
-static inline int is_dma_buf_file(struct file *file)
+int is_dma_buf_file(struct file *file)
 {
 	return file->f_op == &dma_buf_fops;
 }
+EXPORT_SYMBOL_GPL(is_dma_buf_file);
 
 static struct file *dma_buf_getfile(struct dma_buf *dmabuf, int flags)
 {
@@ -611,6 +684,10 @@ struct dma_buf *dma_buf_export(const struct dma_buf_export_info *exp_info)
 	file->f_mode |= FMODE_LSEEK;
 	dmabuf->file = file;
 
+	ret = dma_buf_stats_setup(dmabuf);
+	if (ret)
+		goto err_sysfs;
+
 	mutex_init(&dmabuf->lock);
 	INIT_LIST_HEAD(&dmabuf->attachments);
 
@@ -620,6 +697,14 @@ struct dma_buf *dma_buf_export(const struct dma_buf_export_info *exp_info)
 
 	return dmabuf;
 
+err_sysfs:
+	/*
+	 * Set file->f_path.dentry->d_fsdata to NULL so that when
+	 * dma_buf_release() gets invoked by dentry_ops, it exits
+	 * early before calling the release() dma_buf op.
+	 */
+	file->f_path.dentry->d_fsdata = NULL;
+	fput(file);
 err_dmabuf:
 	kfree(dmabuf);
 err_module:
@@ -1499,6 +1584,12 @@ static inline void dma_buf_uninit_debugfs(void)
 
 static int __init dma_buf_init(void)
 {
+	int ret;
+
+	ret = dma_buf_init_sysfs_statistics();
+	if (ret)
+		return ret;
+
 	dma_buf_mnt = kern_mount(&dma_buf_fs_type);
 	if (IS_ERR(dma_buf_mnt))
 		return PTR_ERR(dma_buf_mnt);
@@ -1514,5 +1605,6 @@ static void __exit dma_buf_deinit(void)
 {
 	dma_buf_uninit_debugfs();
 	kern_unmount(dma_buf_mnt);
+	dma_buf_uninit_sysfs_statistics();
 }
 __exitcall(dma_buf_deinit);

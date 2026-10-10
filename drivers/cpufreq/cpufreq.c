@@ -391,6 +391,7 @@ static void cpufreq_notify_transition(struct cpufreq_policy *policy,
 		cpufreq_stats_record_transition(policy, freqs->new);
 		cpufreq_times_record_transition(policy, freqs->new);
 		policy->cur = freqs->new;
+		trace_android_rvh_cpufreq_transition(policy);
 	}
 }
 
@@ -696,6 +697,7 @@ static ssize_t show_cpuinfo_max_freq(struct cpufreq_policy *policy, char *buf)
 	unsigned int max_freq = policy->cpuinfo.max_freq;
 
 	trace_android_vh_show_max_freq(policy, &max_freq);
+	trace_android_rvh_show_max_freq(policy, &max_freq);
 	return sprintf(buf, "%u\n", max_freq);
 }
 
@@ -1378,9 +1380,14 @@ static int cpufreq_online(unsigned int cpu)
 			goto out_free_policy;
 		}
 
+		/*
+		 * The initialization has succeeded and the policy is online.
+		 * If there is a problem with its frequency table, take it
+		 * offline and drop it.
+		 */
 		ret = cpufreq_table_validate_and_sort(policy);
 		if (ret)
-			goto out_exit_policy;
+			goto out_offline_policy;
 
 		/* related_cpus should at least include policy->cpus. */
 		cpumask_copy(policy->related_cpus, policy->cpus);
@@ -1523,6 +1530,10 @@ out_destroy_policy:
 		remove_cpu_dev_symlink(policy, get_cpu_device(j));
 
 	up_write(&policy->rwsem);
+
+out_offline_policy:
+	if (cpufreq_driver->offline)
+		cpufreq_driver->offline(policy);
 
 out_exit_policy:
 	if (cpufreq_driver->exit)
@@ -2095,6 +2106,7 @@ unsigned int cpufreq_driver_fast_switch(struct cpufreq_policy *policy,
 	arch_set_freq_scale(policy->related_cpus, freq,
 			    policy->cpuinfo.max_freq);
 	cpufreq_stats_record_transition(policy, freq);
+	trace_android_rvh_cpufreq_transition(policy);
 
 	if (trace_cpu_frequency_enabled()) {
 		for_each_cpu(cpu, policy->cpus)
@@ -2537,6 +2549,7 @@ static int cpufreq_set_policy(struct cpufreq_policy *policy,
 
 	return ret;
 }
+EXPORT_TRACEPOINT_SYMBOL_GPL(cpu_frequency_limits);
 
 /**
  * cpufreq_update_policy - Re-evaluate an existing cpufreq policy.

@@ -22,11 +22,13 @@
 //ctrls & extension ctrls definitions
 #define V4L2_CID_NON_FRAME		(V4L2_CID_USER_IMX_BASE)
 #define V4L2_CID_DIS_REORDER		(V4L2_CID_USER_IMX_BASE + 1)
-#define V4L2_CID_ROI_COUNT			(V4L2_CID_USER_IMX_BASE + 2)
-#define V4L2_CID_ROI				(V4L2_CID_USER_IMX_BASE + 3)
+#define V4L2_CID_ROI_COUNT		(V4L2_CID_USER_IMX_BASE + 2)
+#define V4L2_CID_ROI			(V4L2_CID_USER_IMX_BASE + 3)
 #define V4L2_CID_IPCM_COUNT		(V4L2_CID_USER_IMX_BASE + 4)
-#define V4L2_CID_IPCM				(V4L2_CID_USER_IMX_BASE + 5)
-#define V4L2_CID_HDR10META			(V4L2_CID_USER_IMX_BASE + 6)
+#define V4L2_CID_IPCM			(V4L2_CID_USER_IMX_BASE + 5)
+#define V4L2_CID_HDR10META		(V4L2_CID_USER_IMX_BASE + 6)
+#define V4L2_CID_SECUREMODE		(V4L2_CID_USER_IMX_BASE + 7)
+#define V4L2_CID_SC_ENABLE		(V4L2_CID_USER_IMX_BASE + 8)
 
 #define V4L2_MAX_ROI_REGIONS		8
 struct v4l2_enc_roi_param {
@@ -99,6 +101,7 @@ enum {
 #define V4L2_PIX_FMT_TILEX			v4l2_fourcc('D', 'T', 'R', 'X') /* 10 bit tile output, uncompressed */
 #define V4L2_PIX_FMT_RFC			v4l2_fourcc('R', 'F', 'C', '0') /* 8bit tile output, with rfc*/
 #define V4L2_PIX_FMT_RFCX			v4l2_fourcc('R', 'F', 'C', 'X') /* 10 bit tile output, with rfc */
+#define V4L2_PIX_FMT_411SP			v4l2_fourcc('4', '1', 'S', 'P') /* YUV 411 Semi planar */
 
 /*codec format*/
 #define V4L2_PIX_FMT_AV1			v4l2_fourcc('A', 'V', '1', '0')	/* av1 */

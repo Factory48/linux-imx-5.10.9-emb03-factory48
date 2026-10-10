@@ -5,7 +5,7 @@
  * ISI is a Image Sensor Interface of i.MX8QXP/QM platform, which
  * used to process image from camera sensor to memory or DC
  *
- * Copyright (c) 2019 NXP Semiconductor
+ * Copyright 2019-2021 NXP
  *
  */
 
@@ -24,6 +24,7 @@
 #include <media/v4l2-device.h>
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-mem2mem.h>
+#include <media/v4l2-event.h>
 #include <media/videobuf2-core.h>
 #include <media/videobuf2-dma-contig.h>
 
@@ -338,6 +339,15 @@ static int cap_vb2_queue_setup(struct vb2_queue *q,
 	if (!fmt)
 		return -EINVAL;
 
+	if (*num_planes) {
+		if (*num_planes != fmt->memplanes)
+			return -EINVAL;
+
+		for (i = 0; i < *num_planes; i++)
+			if (sizes[i] < dst_f->sizeimage[i])
+				return -EINVAL;
+	}
+
 	for (i = 0; i < fmt->memplanes; i++)
 		alloc_devs[i] = &isi_cap->pdev->dev;
 
@@ -377,6 +387,7 @@ static int cap_vb2_buffer_prepare(struct vb2_buffer *vb2)
 			v4l2_err(&isi_cap->vdev,
 				 "User buffer too small (%ld < %ld)\n",
 				 vb2_plane_size(vb2, i), size);
+
 			return -EINVAL;
 		}
 
@@ -437,6 +448,22 @@ static int cap_vb2_start_streaming(struct vb2_queue *q, unsigned int count)
 						  isi_cap->discard_buffer_dma[j]);
 				dev_err(&isi_cap->pdev->dev,
 					"alloc dma buffer(%d) fail\n", j);
+			}
+			while (!list_empty(&isi_cap->out_active)) {
+				buf = list_entry(isi_cap->out_active.next,
+						 struct mxc_isi_buffer, list);
+				list_del_init(&buf->list);
+				if (buf->discard)
+					continue;
+
+				vb2_buffer_done(&buf->v4l2_buf.vb2_buf, VB2_BUF_STATE_ERROR);
+			}
+
+			while (!list_empty(&isi_cap->out_pending)) {
+				buf = list_entry(isi_cap->out_pending.next,
+						 struct mxc_isi_buffer, list);
+				list_del_init(&buf->list);
+				vb2_buffer_done(&buf->v4l2_buf.vb2_buf, VB2_BUF_STATE_ERROR);
 			}
 			return -ENOMEM;
 		}
@@ -702,12 +729,54 @@ static bool is_entity_link_setup(struct mxc_isi_cap_dev *isi_cap)
 	return true;
 }
 
+static int isi_cap_fmt_init(struct mxc_isi_cap_dev *isi_cap)
+{
+	struct mxc_isi_frame *dst_f = &isi_cap->dst_f;
+	struct mxc_isi_frame *src_f = &isi_cap->src_f;
+	struct v4l2_subdev_format src_fmt;
+	struct v4l2_subdev *src_sd;
+	int i, ret;
+
+	src_sd = mxc_get_remote_subdev(&isi_cap->sd, __func__);
+	if (!src_sd) {
+		v4l2_err(&isi_cap->sd, "get remote subdev fail!\n");
+		return -EINVAL;
+	}
+
+	memset(&src_fmt, 0, sizeof(src_fmt));
+	src_fmt.which = V4L2_SUBDEV_FORMAT_ACTIVE;
+	ret = v4l2_subdev_call(src_sd, pad, get_fmt, NULL, &src_fmt);
+	if (ret < 0 && ret != -ENOIOCTLCMD) {
+		v4l2_err(&isi_cap->sd, "get remote fmt fail!\n");
+		return ret;
+	}
+
+	if (dst_f->width == 0 || dst_f->height == 0)
+		set_frame_bounds(dst_f, src_fmt.format.width, src_fmt.format.height);
+
+	if (!dst_f->fmt)
+		dst_f->fmt = &mxc_isi_out_formats[0];
+
+	for (i = 0; i < dst_f->fmt->memplanes; i++) {
+		if (dst_f->bytesperline[i] == 0)
+			dst_f->bytesperline[i] = dst_f->width * dst_f->fmt->depth[i] >> 3;
+		if (dst_f->sizeimage[i] == 0)
+			dst_f->sizeimage[i] = dst_f->bytesperline[i] * dst_f->height;
+	}
+
+	if (!src_f->fmt)
+		memcpy(src_f, dst_f, sizeof(*dst_f));
+	return 0;
+}
+
+
 static int mxc_isi_capture_open(struct file *file)
 {
 	struct mxc_isi_cap_dev *isi_cap = video_drvdata(file);
 	struct mxc_isi_dev *mxc_isi = mxc_isi_get_hostdata(isi_cap->pdev);
 	struct device *dev = &isi_cap->pdev->dev;
 	struct v4l2_subdev *sd;
+	struct v4l2_subdev *sd2;
 	int ret = -EBUSY;
 
 	mutex_lock(&isi_cap->lock);
@@ -718,7 +787,7 @@ static int mxc_isi_capture_open(struct file *file)
 	}
 	mutex_unlock(&isi_cap->lock);
 
-	if (mxc_isi->m2m_enabled) {
+	if (mxc_isi->m2m_enabled || isi_cap->is_streaming[isi_cap->id]) {
 		dev_err(dev, "ISI channel[%d] is busy\n", isi_cap->id);
 		return ret;
 	}
@@ -726,6 +795,13 @@ static int mxc_isi_capture_open(struct file *file)
 	sd = mxc_get_remote_subdev(&isi_cap->sd, __func__);
 	if (!sd)
 		return -ENODEV;
+
+	sd2 = mxc_get_remote_subdev(sd, __func__);
+	if (sd2) {
+		dev_info(dev, "%s: src name is %s\n", __func__, sd2->name);
+		if (strstr(sd2->name, "ov5640"))
+			isi_cap->set_power_in_open_close = true;
+	}
 
 	mutex_lock(&isi_cap->lock);
 	ret = v4l2_fh_open(file);
@@ -737,20 +813,26 @@ static int mxc_isi_capture_open(struct file *file)
 
 	pm_runtime_get_sync(dev);
 
-	ret = v4l2_subdev_call(sd, core, s_power, 1);
-	if (ret) {
-		dev_err(dev, "Call subdev s_power fail!\n");
-		pm_runtime_put(dev);
-		return ret;
+	if (isi_cap->set_power_in_open_close) {
+		ret = v4l2_subdev_call(sd, core, s_power, 1);
+		if (ret) {
+			dev_err(dev, "Call subdev s_power fail!\n");
+			pm_runtime_put(dev);
+			return ret;
+		}
 	}
+
+	mutex_lock(&isi_cap->lock);
+	ret = isi_cap_fmt_init(isi_cap);
+	mutex_unlock(&isi_cap->lock);
 
 	/* increase usage count for ISI channel */
 	mutex_lock(&mxc_isi->lock);
 	atomic_inc(&mxc_isi->usage_count);
-	mxc_isi->m2m_enabled = false;
+	mxc_isi->cap_enabled = true;
 	mutex_unlock(&mxc_isi->lock);
 
-	return 0;
+	return ret;
 }
 
 static int mxc_isi_capture_release(struct file *file)
@@ -786,13 +868,19 @@ static int mxc_isi_capture_release(struct file *file)
 	    atomic_dec_and_test(&mxc_isi->usage_count))
 		mxc_isi_channel_deinit(mxc_isi);
 
-	ret = v4l2_subdev_call(sd, core, s_power, 0);
-	if (ret < 0 && ret != -ENOIOCTLCMD) {
-		dev_err(dev, "%s s_power fail\n", __func__);
-		goto label;
+	if (isi_cap->set_power_in_open_close) {
+		ret = v4l2_subdev_call(sd, core, s_power, 0);
+		if (ret < 0 && ret != -ENOIOCTLCMD) {
+			dev_err(dev, "%s s_power fail\n", __func__);
+			goto label;
+		}
 	}
 
 label:
+	mutex_lock(&mxc_isi->lock);
+	mxc_isi->cap_enabled = false;
+	mutex_unlock(&mxc_isi->lock);
+
 	pm_runtime_put(dev);
 	return (ret) ? ret : 0;
 }
@@ -858,7 +946,9 @@ static int mxc_isi_cap_g_fmt_mplane(struct file *file, void *fh,
 	pix->height = dst_f->o_height;
 	pix->field = V4L2_FIELD_NONE;
 	pix->pixelformat = dst_f->fmt->fourcc;
-	pix->colorspace = V4L2_COLORSPACE_JPEG;
+	pix->colorspace = V4L2_COLORSPACE_SRGB;
+	pix->ycbcr_enc = V4L2_MAP_YCBCR_ENC_DEFAULT(pix->colorspace);
+	pix->quantization = V4L2_QUANTIZATION_FULL_RANGE;
 	pix->num_planes = dst_f->fmt->memplanes;
 
 	for (i = 0; i < pix->num_planes; ++i) {
@@ -875,6 +965,7 @@ static int mxc_isi_cap_try_fmt_mplane(struct file *file, void *fh,
 	struct mxc_isi_cap_dev *isi_cap = video_drvdata(file);
 	struct v4l2_pix_format_mplane *pix = &f->fmt.pix_mp;
 	struct mxc_isi_fmt *fmt;
+	int bpl;
 	int i;
 
 	dev_dbg(&isi_cap->pdev->dev, "%s\n", __func__);
@@ -895,6 +986,36 @@ static int mxc_isi_cap_try_fmt_mplane(struct file *file, void *fh,
 		v4l2_err(&isi_cap->sd, "%s, W/H=(%d, %d) is not valid\n"
 			, __func__, pix->width, pix->height);
 		return -EINVAL;
+	}
+
+	if (pix->width > ISI_4K)
+		pix->width = ISI_4K;
+	if (pix->height > ISI_8K)
+		pix->height = ISI_8K;
+
+	pix->num_planes = fmt->memplanes;
+	pix->pixelformat = fmt->fourcc;
+	pix->field = V4L2_FIELD_NONE;
+	pix->colorspace = V4L2_COLORSPACE_SRGB;
+	pix->ycbcr_enc = V4L2_MAP_YCBCR_ENC_DEFAULT(pix->colorspace);
+	pix->quantization = V4L2_QUANTIZATION_FULL_RANGE;
+	memset(pix->reserved, 0x00, sizeof(pix->reserved));
+
+	for (i = 0; i < pix->num_planes; i++) {
+		bpl = pix->plane_fmt[i].bytesperline;
+
+		if ((bpl == 0) || (bpl / (fmt->depth[i] >> 3)) < pix->width)
+			pix->plane_fmt[i].bytesperline =
+					(pix->width * fmt->depth[i]) >> 3;
+
+		if (pix->plane_fmt[i].sizeimage == 0) {
+			if ((i == 1) && (pix->pixelformat == V4L2_PIX_FMT_NV12))
+				pix->plane_fmt[i].sizeimage =
+				  (pix->width * (pix->height >> 1) * fmt->depth[i] >> 3);
+			else
+				pix->plane_fmt[i].sizeimage =
+					(pix->width * pix->height * fmt->depth[i] >> 3);
+		}
 	}
 
 	return 0;
@@ -966,7 +1087,7 @@ static int mxc_isi_cap_s_fmt_mplane(struct file *file, void *priv,
 	struct mxc_isi_frame *dst_f = &isi_cap->dst_f;
 	struct mxc_isi_fmt *fmt;
 	int bpl;
-	int i;
+	int i, ret;
 
 	/* Step1: Check format with output support format list.
 	 * Step2: Update output frame information.
@@ -997,6 +1118,10 @@ static int mxc_isi_cap_s_fmt_mplane(struct file *file, void *priv,
 	/* update out put frame size and formate */
 	if (pix->height <= 0 || pix->width <= 0)
 		return -EINVAL;
+
+	ret = mxc_isi_cap_try_fmt_mplane(file, priv, f);
+	if (ret)
+		return ret;
 
 	dst_f->fmt = fmt;
 	dst_f->height = pix->height;
@@ -1084,24 +1209,49 @@ static int mxc_isi_cap_streamon(struct file *file, void *priv,
 {
 	struct mxc_isi_cap_dev *isi_cap = video_drvdata(file);
 	struct mxc_isi_dev *mxc_isi = mxc_isi_get_hostdata(isi_cap->pdev);
+	struct device *dev = &isi_cap->pdev->dev;
+	struct v4l2_subdev *src_sd;
 	int ret;
 
-	dev_dbg(&isi_cap->pdev->dev, "%s\n", __func__);
+	dev_dbg(dev, "%s\n", __func__);
+
+	if (isi_cap->is_streaming[isi_cap->id]) {
+		dev_err(dev, "ISI channel[%d] is streaming\n", isi_cap->id);
+		return -EBUSY;
+	}
+
+	if (false == isi_cap->set_power_in_open_close) {
+		src_sd = mxc_get_remote_subdev(&isi_cap->sd, __func__);
+		ret = (!src_sd) ? -EINVAL : v4l2_subdev_call(src_sd, core, s_power, 1);
+		if (ret) {
+			v4l2_err(&isi_cap->sd, "Call subdev s_power fail!\n");
+			return ret;
+		}
+	}
+
 
 	ret = mxc_isi_config_parm(isi_cap);
 	if (ret < 0)
-		return ret;
+		goto power;
 
 	ret = vb2_ioctl_streamon(file, priv, type);
 	mxc_isi_channel_enable(mxc_isi, mxc_isi->m2m_enabled);
 	ret = mxc_isi_pipeline_enable(isi_cap, 1);
 	if (ret < 0 && ret != -ENOIOCTLCMD)
-		return ret;
+		goto disable;
 
 	isi_cap->is_streaming[isi_cap->id] = 1;
 	mxc_isi->is_streaming = 1;
 
 	return 0;
+
+disable:
+	mxc_isi_channel_disable(mxc_isi);
+	vb2_ioctl_streamoff(file, priv, type);
+power:
+	if (false == isi_cap->set_power_in_open_close)
+		v4l2_subdev_call(src_sd, core, s_power, 0);
+	return ret;
 }
 
 static int mxc_isi_cap_streamoff(struct file *file, void *priv,
@@ -1109,9 +1259,16 @@ static int mxc_isi_cap_streamoff(struct file *file, void *priv,
 {
 	struct mxc_isi_cap_dev *isi_cap = video_drvdata(file);
 	struct mxc_isi_dev *mxc_isi = mxc_isi_get_hostdata(isi_cap->pdev);
+	struct device *dev = &isi_cap->pdev->dev;
+	struct v4l2_subdev *src_sd;
 	int ret;
 
-	dev_dbg(&isi_cap->pdev->dev, "%s\n", __func__);
+	dev_dbg(dev, "%s\n", __func__);
+
+	if (isi_cap->is_streaming[isi_cap->id] == 0) {
+		dev_err(dev, "ISI channel[%d] has stopped\n", isi_cap->id);
+		return -EBUSY;
+	}
 
 	mxc_isi_pipeline_enable(isi_cap, 0);
 	mxc_isi_channel_disable(mxc_isi);
@@ -1119,6 +1276,11 @@ static int mxc_isi_cap_streamoff(struct file *file, void *priv,
 
 	isi_cap->is_streaming[isi_cap->id] = 0;
 	mxc_isi->is_streaming = 0;
+
+	if (false == isi_cap->set_power_in_open_close) {
+		src_sd = mxc_get_remote_subdev(&isi_cap->sd, __func__);
+		ret = v4l2_subdev_call(src_sd, core, s_power, 0);
+	}
 
 	return ret;
 }
@@ -1330,6 +1492,9 @@ static const struct v4l2_ioctl_ops mxc_isi_capture_ioctl_ops = {
 
 	.vidioc_enum_framesizes = mxc_isi_cap_enum_framesizes,
 	.vidioc_enum_frameintervals = mxc_isi_cap_enum_frameintervals,
+
+	.vidioc_subscribe_event   =  v4l2_ctrl_subscribe_event,
+	.vidioc_unsubscribe_event =  v4l2_event_unsubscribe,
 };
 
 /* Capture subdev media entity operations */
@@ -1438,7 +1603,7 @@ static int mxc_isi_subdev_get_fmt(struct v4l2_subdev *sd,
 	/* Source/Sink pads crop rectangle size */
 	mf->width = f->width;
 	mf->height = f->height;
-	mf->colorspace = V4L2_COLORSPACE_JPEG;
+	mf->colorspace = V4L2_COLORSPACE_SRGB;
 
 	mutex_unlock(&isi_cap->lock);
 
@@ -1634,11 +1799,6 @@ static int mxc_isi_register_cap_device(struct mxc_isi_cap_dev *isi_cap,
 	if (ret)
 		goto err_free_ctx;
 
-	/* Default configuration  */
-	isi_cap->dst_f.width = 1280;
-	isi_cap->dst_f.height = 800;
-	isi_cap->dst_f.fmt = &mxc_isi_out_formats[0];
-	isi_cap->src_f.fmt = isi_cap->dst_f.fmt;
 
 	isi_cap->cap_pad.flags = MEDIA_PAD_FL_SINK;
 	vdev->entity.function = MEDIA_ENT_F_PROC_VIDEO_SCALER;

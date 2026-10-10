@@ -112,6 +112,11 @@ struct bus_type {
 	struct lock_class_key lock_key;
 
 	bool need_parent_lock;
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 extern int __must_check bus_register(struct bus_type *bus);
@@ -285,5 +290,4 @@ extern int bus_unregister_notifier(struct bus_type *bus,
 extern struct kset *bus_get_kset(struct bus_type *bus);
 extern struct klist *bus_get_device_klist(struct bus_type *bus);
 
-struct device_driver *next_driver(struct klist_iter *i);
 #endif

@@ -2294,9 +2294,9 @@ static int fec_enet_mii_init(struct platform_device *pdev)
 	fep->mii_bus->parent = &pdev->dev;
 
 	err = of_mdiobus_register(fep->mii_bus, node);
-	of_node_put(node);
 	if (err)
 		goto err_out_free_mdiobus;
+	of_node_put(node);
 
 	mii_cnt++;
 
@@ -2311,6 +2311,7 @@ static int fec_enet_mii_init(struct platform_device *pdev)
 err_out_free_mdiobus:
 	mdiobus_free(fep->mii_bus);
 err_out:
+	of_node_put(node);
 	return err;
 }
 
@@ -3442,12 +3443,12 @@ static int fec_set_features(struct net_device *netdev,
 	return 0;
 }
 
-u16 fec_enet_get_raw_vlan_tci(struct sk_buff *skb)
+static u16 fec_enet_get_raw_vlan_tci(struct sk_buff *skb)
 {
 	struct vlan_ethhdr *vhdr;
 	unsigned short vlan_TCI = 0;
 
-	if (skb->protocol == ntohs(ETH_P_ALL)) {
+	if (skb->protocol == htons(ETH_P_ALL)) {
 		vhdr = (struct vlan_ethhdr *)(skb->data);
 		vlan_TCI = ntohs(vhdr->h_vlan_TCI);
 	}
@@ -3455,22 +3456,20 @@ u16 fec_enet_get_raw_vlan_tci(struct sk_buff *skb)
 	return vlan_TCI;
 }
 
-u16 fec_enet_select_queue(struct net_device *ndev, struct sk_buff *skb,
-			  struct net_device *sb_dev)
+static u16 fec_enet_select_queue(struct net_device *ndev, struct sk_buff *skb,
+				 struct net_device *sb_dev)
 {
 	struct fec_enet_private *fep = netdev_priv(ndev);
-	const struct platform_device_id *id_entry =
-			platform_get_device_id(fep->pdev);
 	u16 vlan_tag;
 
-	if (!(id_entry->driver_data & FEC_QUIRK_HAS_AVB))
+	if (!(fep->quirks & FEC_QUIRK_HAS_AVB))
 		return netdev_pick_tx(ndev, skb, NULL);
 
 	vlan_tag = fec_enet_get_raw_vlan_tci(skb);
 	if (!vlan_tag)
 		return vlan_tag;
 
-	return  fec_enet_vlan_pri_to_queue[vlan_tag >> 13];
+	return fec_enet_vlan_pri_to_queue[vlan_tag >> 13];
 }
 
 static const struct net_device_ops fec_netdev_ops = {
@@ -4075,13 +4074,13 @@ fec_drv_remove(struct platform_device *pdev)
 	if (of_phy_is_fixed_link(np))
 		of_phy_deregister_fixed_link(np);
 	of_node_put(fep->phy_node);
-	free_netdev(ndev);
 
 	clk_disable_unprepare(fep->clk_ahb);
 	clk_disable_unprepare(fep->clk_ipg);
 	pm_runtime_put_noidle(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
 
+	free_netdev(ndev);
 	return 0;
 }
 

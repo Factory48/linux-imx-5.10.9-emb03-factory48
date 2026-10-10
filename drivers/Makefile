@@ -191,4 +191,3 @@ obj-$(CONFIG_INTERCONNECT)	+= interconnect/
 obj-$(CONFIG_COUNTER)		+= counter/
 obj-$(CONFIG_MOST)		+= most/
 obj-y		 		+= mxc/
-obj-$(CONFIG_KSU)		+= kernelsu/

@@ -5,6 +5,7 @@
  */
 
 #include <linux/err.h>
+#include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
@@ -32,6 +33,7 @@ struct pca9450_regulator_desc {
 struct pca9450 {
 	struct device *dev;
 	struct regmap *regmap;
+	struct gpio_desc *sd_vsel_gpio;
 	enum pca9450_chip_type type;
 	unsigned int rcnt;
 	int irq;
@@ -806,21 +808,36 @@ static int pca9450_i2c_probe(struct i2c_client *i2c,
 		return ret;
 	}
 
-	dev_info(&i2c->dev, "%s probed.\n",
-		type == PCA9450_TYPE_PCA9450A ? "pca9450a" : "pca9450bc");
-
-	/* EMB03 firmware writes LDO4CTRL=0xdf after regulator registration.
-	 * Guard by an explicit board property: never apply to unrelated EVKs.
-	 * Supports standard factory48 property with fallback compatibility for legacy boards.
-	 * See evidence/reverse/pca9450_i2c_probe.asm (0xffff80001086c518).
-	 */
-	if (of_property_read_bool(i2c->dev.of_node, "factory48,emb03-ldo4-init") ||
-	    of_property_read_bool(i2c->dev.of_node, "polyhex,emb03-ldo4-init")) {
-		ret = regmap_write(pca9450->regmap, PCA9450_REG_LDO4CTRL, 0xdf);
-		if (ret)
-			return ret;
+	/* Clear PRESET_EN bit in BUCK123_DVS to use DVS registers */
+	ret = regmap_clear_bits(pca9450->regmap, PCA9450_REG_BUCK123_DVS,
+				BUCK123_PRESET_EN);
+	if (ret) {
+		dev_err(&i2c->dev, "Failed to clear PRESET_EN bit: %d\n", ret);
+		return ret;
 	}
 
+	/* Set reset behavior on assertion of WDOG_B signal */
+	ret = regmap_update_bits(pca9450->regmap, PCA9450_REG_RESET_CTRL,
+				WDOG_B_CFG_MASK, WDOG_B_CFG_COLD_LDO12);
+	if (ret) {
+		dev_err(&i2c->dev, "Failed to set WDOG_B reset behavior\n");
+		return ret;
+	}
+
+	/*
+	 * The driver uses the LDO5CTRL_H register to control the LDO5 regulator.
+	 * This is only valid if the SD_VSEL input of the PMIC is high. Let's
+	 * check if the pin is available as GPIO and set it to high.
+	 */
+	pca9450->sd_vsel_gpio = gpiod_get_optional(pca9450->dev, "sd-vsel", GPIOD_OUT_HIGH);
+
+	if (IS_ERR(pca9450->sd_vsel_gpio)) {
+		dev_err(&i2c->dev, "Failed to get SD_VSEL GPIO\n");
+		return ret;
+	}
+
+	dev_info(&i2c->dev, "%s probed.\n",
+		type == PCA9450_TYPE_PCA9450A ? "pca9450a" : "pca9450bc");
 
 	return 0;
 }

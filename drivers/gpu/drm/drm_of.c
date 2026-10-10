@@ -100,10 +100,8 @@ void drm_of_component_match_add(struct device *master,
 EXPORT_SYMBOL_GPL(drm_of_component_match_add);
 
 /**
- * drm_of_component_probe_with_match - Generic probe function with match
- *                                     entries for a component based master
+ * drm_of_component_probe - Generic probe function for a component based master
  * @dev: master device containing the OF node
- * @match: component match pointer provided to store matches
  * @compare_of: compare function used for matching components
  * @m_ops: component master ops to be used
  *
@@ -114,12 +112,12 @@ EXPORT_SYMBOL_GPL(drm_of_component_match_add);
  *
  * Returns zero if successful, or one of the standard error codes if it fails.
  */
-int drm_of_component_probe_with_match(struct device *dev,
-			   struct component_match *match,
+int drm_of_component_probe(struct device *dev,
 			   int (*compare_of)(struct device *, void *),
 			   const struct component_master_ops *m_ops)
 {
 	struct device_node *ep, *port, *remote;
+	struct component_match *match = NULL;
 	int i;
 
 	if (!dev->of_node)
@@ -184,29 +182,6 @@ int drm_of_component_probe_with_match(struct device *dev,
 	}
 
 	return component_master_add_with_match(dev, m_ops, match);
-}
-EXPORT_SYMBOL(drm_of_component_probe_with_match);
-
-/**
- * drm_of_component_probe - Generic probe function for a component based master
- * @dev: master device containing the OF node
- * @compare_of: compare function used for matching components
- * @master_ops: component master ops to be used
- *
- * Parse the platform device OF node and bind all the components associated
- * with the master. Interface ports are added before the encoders in order to
- * satisfy their .bind requirements
- * See Documentation/devicetree/bindings/graph.txt for the bindings.
- *
- * Returns zero if successful, or one of the standard error codes if it fails.
- */
-int drm_of_component_probe(struct device *dev,
-			   int (*compare_of)(struct device *, void *),
-			   const struct component_master_ops *m_ops)
-{
-	struct component_match *match = NULL;
-
-	return drm_of_component_probe_with_match(dev, match, compare_of, m_ops);
 }
 EXPORT_SYMBOL(drm_of_component_probe);
 
@@ -340,7 +315,7 @@ static int drm_of_lvds_get_remote_pixels_type(
 
 		remote_port = of_graph_get_remote_port(endpoint);
 		if (!remote_port) {
-			of_node_put(remote_port);
+			of_node_put(endpoint);
 			return -EPIPE;
 		}
 
@@ -356,8 +331,10 @@ static int drm_of_lvds_get_remote_pixels_type(
 		 * configurations by passing the endpoints explicitly to
 		 * drm_of_lvds_get_dual_link_pixel_order().
 		 */
-		if (!current_pt || pixels_type != current_pt)
+		if (!current_pt || pixels_type != current_pt) {
+			of_node_put(endpoint);
 			return -EINVAL;
+		}
 	}
 
 	return pixels_type;

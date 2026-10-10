@@ -155,6 +155,27 @@
 		#address-cells = <2>;
 		#size-cells = <2>;
 		ranges;
+
+		pmem_1: pmem@0xbdef0000 {
+			no-map;
+			reg = <0 0xbdef0000 0 0x00010000>;
+		};
+		ramoops@0xbdf00000 {
+			compatible = "ramoops";
+			reg = <0 0xbdf00000 0 0x00100000>;
+			record-size     = <0x00020000>;
+			console-size    = <0x00020000>;
+			ftrace-size     = <0x00020000>;
+			rpmsg-size      = <0x00020000>;
+		};
+	};
+
+	pmem@0xbdef0000 {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		compatible = "pmem-region";
+		reg = <0 0xbdef0000 0 0x00010000>;
+		volatile;
 	};
 
 	osc_32k: clock-osc-32k {
@@ -1438,20 +1459,6 @@
 			compatible = "dsi,mipi-reset";
 			resets = <&dispmix_mipi_rst IMX8MM_MIPI_M_RESET>;
 		};
-	};
-
-	rpmsg: rpmsg{
-		compatible = "fsl,imx8mq-rpmsg";
-		/* up to now, the following channels are used in imx rpmsg
-		 * - tx1/rx1: messages channel.
-		 * - general interrupt1: remote proc finish re-init rpmsg stack
-		 *   when A core is partition reset.
-		 */
-		mbox-names = "tx", "rx", "rxdb";
-		mboxes = <&mu 0 1
-			  &mu 1 1
-			  &mu 3 1>;
-		status = "disabled";
 	};
 
 	vpu_h1: vpu_h1@38320000 {

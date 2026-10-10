@@ -32,6 +32,8 @@
 #include <linux/bpf-netns.h>
 #include <linux/rcupdate_trace.h>
 
+#include <trace/hooks/syscall_check.h>
+
 #define IS_FD_ARRAY(map) ((map)->map_type == BPF_MAP_TYPE_PERF_EVENT_ARRAY || \
 			  (map)->map_type == BPF_MAP_TYPE_CGROUP_ARRAY || \
 			  (map)->map_type == BPF_MAP_TYPE_ARRAY_OF_MAPS)
@@ -2717,7 +2719,6 @@ out_unlock:
 out_put_prog:
 	if (tgt_prog_fd && tgt_prog)
 		bpf_prog_put(tgt_prog);
-	bpf_prog_put(prog);
 	return err;
 }
 
@@ -2830,7 +2831,10 @@ static int bpf_raw_tracepoint_open(const union bpf_attr *attr)
 			tp_name = prog->aux->attach_func_name;
 			break;
 		}
-		return bpf_tracing_prog_attach(prog, 0, 0);
+		err = bpf_tracing_prog_attach(prog, 0, 0);
+		if (err >= 0)
+			return err;
+		goto out_put_prog;
 	case BPF_PROG_TYPE_RAW_TRACEPOINT:
 	case BPF_PROG_TYPE_RAW_TRACEPOINT_WRITABLE:
 		if (strncpy_from_user(buf,
@@ -4371,6 +4375,8 @@ SYSCALL_DEFINE3(bpf, int, cmd, union bpf_attr __user *, uattr, unsigned int, siz
 	memset(&attr, 0, sizeof(attr));
 	if (copy_from_user(&attr, uattr, size) != 0)
 		return -EFAULT;
+
+	trace_android_vh_check_bpf_syscall(cmd, &attr, size);
 
 	err = security_bpf(cmd, &attr, size);
 	if (err < 0)

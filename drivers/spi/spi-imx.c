@@ -33,6 +33,7 @@ module_param(use_dma, bool, 0644);
 MODULE_PARM_DESC(use_dma, "Enable usage of DMA when available (default)");
 
 #define MXC_RPM_TIMEOUT		2000 /* 2000ms */
+#define MXC_SPI_DEFAULT_SPEED	500000 /* 500KHz */
 
 #define MXC_CSPIRXDATA		0x00
 #define MXC_CSPITXDATA		0x04
@@ -67,8 +68,7 @@ struct spi_imx_data;
 struct spi_imx_devtype_data {
 	void (*intctrl)(struct spi_imx_data *, int);
 	int (*prepare_message)(struct spi_imx_data *, struct spi_message *);
-	int (*prepare_transfer)(struct spi_imx_data *, struct spi_device *,
-				struct spi_transfer *);
+	int (*prepare_transfer)(struct spi_imx_data *, struct spi_device *);
 	void (*trigger)(struct spi_imx_data *);
 	int (*rx_available)(struct spi_imx_data *);
 	void (*reset)(struct spi_imx_data *);
@@ -504,6 +504,12 @@ static void mx51_ecspi_trigger(struct spi_imx_data *spi_imx)
 	else
 		reg &= ~MX51_ECSPI_CTRL_SMC;
 	writel(reg, spi_imx->base + MX51_ECSPI_CTRL);
+
+	if (spi_imx->usedma) {
+		reg = readl(spi_imx->base + MX51_ECSPI_DMA);
+		reg |= MX51_ECSPI_DMA_TEDEN | MX51_ECSPI_DMA_RXDEN;
+		writel(reg, spi_imx->base + MX51_ECSPI_DMA);
+	}
 }
 
 static void mx51_disable_dma(struct spi_imx_data *spi_imx)
@@ -524,8 +530,10 @@ static int mx51_ecspi_prepare_message(struct spi_imx_data *spi_imx,
 				      struct spi_message *msg)
 {
 	struct spi_device *spi = msg->spi;
+	struct spi_transfer *xfer;
 	u32 ctrl = MX51_ECSPI_CTRL_ENABLE;
-	u32 testreg;
+	u32 min_speed_hz = ~0U;
+	u32 testreg, delay;
 	u32 cfg = readl(spi_imx->base + MX51_ECSPI_CONFIG);
 
 	/* set Master or Slave mode */
@@ -586,15 +594,43 @@ static int mx51_ecspi_prepare_message(struct spi_imx_data *spi_imx,
 
 	writel(cfg, spi_imx->base + MX51_ECSPI_CONFIG);
 
+	/*
+	 * Wait until the changes in the configuration register CONFIGREG
+	 * propagate into the hardware. It takes exactly one tick of the
+	 * SCLK clock, but we will wait two SCLK clock just to be sure. The
+	 * effect of the delay it takes for the hardware to apply changes
+	 * is noticable if the SCLK clock run very slow. In such a case, if
+	 * the polarity of SCLK should be inverted, the GPIO ChipSelect might
+	 * be asserted before the SCLK polarity changes, which would disrupt
+	 * the SPI communication as the device on the other end would consider
+	 * the change of SCLK polarity as a clock tick already.
+	 *
+	 * Because spi_imx->spi_bus_clk is only set in bitbang prepare_message
+	 * callback, iterate over all the transfers in spi_message, find the
+	 * one with lowest bus frequency, and use that bus frequency for the
+	 * delay calculation. In case all transfers have speed_hz == 0, then
+	 * min_speed_hz is ~0 and the resulting delay is zero.
+	 */
+	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
+		if (!xfer->speed_hz)
+			continue;
+		min_speed_hz = min(xfer->speed_hz, min_speed_hz);
+	}
+
+	delay = (2 * 1000000) / min_speed_hz;
+	if (likely(delay < 10))	/* SCLK is faster than 100 kHz */
+		udelay(delay);
+	else			/* SCLK is _very_ slow */
+		usleep_range(delay, delay + 10);
+
 	return 0;
 }
 
 static int mx51_ecspi_prepare_transfer(struct spi_imx_data *spi_imx,
-				       struct spi_device *spi,
-				       struct spi_transfer *t)
+				       struct spi_device *spi)
 {
 	u32 ctrl = readl(spi_imx->base + MX51_ECSPI_CTRL);
-	u32 clk = t->speed_hz, delay;
+	u32 clk;
 
 	/* Clear BL field and set the right value */
 	ctrl &= ~MX51_ECSPI_CTRL_BL_MASK;
@@ -608,8 +644,10 @@ static int mx51_ecspi_prepare_transfer(struct spi_imx_data *spi_imx,
 	/* set clock speed */
 	ctrl &= ~(0xf << MX51_ECSPI_CTRL_POSTDIV_OFFSET |
 		  0xf << MX51_ECSPI_CTRL_PREDIV_OFFSET);
-	ctrl |= mx51_ecspi_clkdiv(spi_imx, t->speed_hz, &clk);
-	spi_imx->spi_bus_clk = clk;
+	if (!spi_imx->slave_mode) {
+		ctrl |= mx51_ecspi_clkdiv(spi_imx, spi_imx->spi_bus_clk, &clk);
+		spi_imx->spi_bus_clk = clk;
+	}
 
 	/*
 	 * ERR009165: work in XHC mode instead of SMC as PIO on the chips
@@ -623,23 +661,6 @@ static int mx51_ecspi_prepare_transfer(struct spi_imx_data *spi_imx,
 	}
 
 	writel(ctrl, spi_imx->base + MX51_ECSPI_CTRL);
-
-	/*
-	 * Wait until the changes in the configuration register CONFIGREG
-	 * propagate into the hardware. It takes exactly one tick of the
-	 * SCLK clock, but we will wait two SCLK clock just to be sure. The
-	 * effect of the delay it takes for the hardware to apply changes
-	 * is noticable if the SCLK clock run very slow. In such a case, if
-	 * the polarity of SCLK should be inverted, the GPIO ChipSelect might
-	 * be asserted before the SCLK polarity changes, which would disrupt
-	 * the SPI communication as the device on the other end would consider
-	 * the change of SCLK polarity as a clock tick already.
-	 */
-	delay = (2 * 1000000) / clk;
-	if (likely(delay < 10))	/* SCLK is faster than 100 kHz */
-		udelay(delay);
-	else			/* SCLK is _very_ slow */
-		usleep_range(delay, delay + 10);
 
 	return 0;
 }
@@ -657,7 +678,6 @@ static void mx51_setup_wml(struct spi_imx_data *spi_imx)
 	writel(MX51_ECSPI_DMA_RX_WML(spi_imx->wml - 1) |
 		MX51_ECSPI_DMA_TX_WML(tx_wml) |
 		MX51_ECSPI_DMA_RXT_WML(spi_imx->wml) |
-		MX51_ECSPI_DMA_TEDEN | MX51_ECSPI_DMA_RXDEN |
 		MX51_ECSPI_DMA_RXTDEN, spi_imx->base + MX51_ECSPI_DMA);
 }
 
@@ -732,15 +752,16 @@ static int mx31_prepare_message(struct spi_imx_data *spi_imx,
 }
 
 static int mx31_prepare_transfer(struct spi_imx_data *spi_imx,
-				 struct spi_device *spi,
-				 struct spi_transfer *t)
+				 struct spi_device *spi)
 {
 	unsigned int reg = MX31_CSPICTRL_ENABLE | MX31_CSPICTRL_MASTER;
 	unsigned int clk;
 
-	reg |= spi_imx_clkdiv_2(spi_imx->spi_clk, t->speed_hz, &clk) <<
-		MX31_CSPICTRL_DR_SHIFT;
-	spi_imx->spi_bus_clk = clk;
+	if (!spi_imx->slave_mode) {
+		reg |= spi_imx_clkdiv_2(spi_imx->spi_clk, spi_imx->spi_bus_clk, &clk) <<
+			MX31_CSPICTRL_DR_SHIFT;
+		spi_imx->spi_bus_clk = clk;
+	}
 
 	if (is_imx35_cspi(spi_imx)) {
 		reg |= (spi_imx->bits_per_word - 1) << MX35_CSPICTRL_BL_SHIFT;
@@ -837,16 +858,17 @@ static int mx21_prepare_message(struct spi_imx_data *spi_imx,
 }
 
 static int mx21_prepare_transfer(struct spi_imx_data *spi_imx,
-				 struct spi_device *spi,
-				 struct spi_transfer *t)
+				 struct spi_device *spi)
 {
 	unsigned int reg = MX21_CSPICTRL_ENABLE | MX21_CSPICTRL_MASTER;
 	unsigned int max = is_imx27_cspi(spi_imx) ? 16 : 18;
 	unsigned int clk;
 
-	reg |= spi_imx_clkdiv_1(spi_imx->spi_clk, t->speed_hz, max, &clk)
-		<< MX21_CSPICTRL_DR_SHIFT;
-	spi_imx->spi_bus_clk = clk;
+	if (!spi_imx->slave_mode) {
+		reg |= spi_imx_clkdiv_1(spi_imx->spi_clk, spi_imx->spi_bus_clk, max, &clk)
+			<< MX21_CSPICTRL_DR_SHIFT;
+		spi_imx->spi_bus_clk = clk;
+	}
 
 	reg |= spi_imx->bits_per_word - 1;
 
@@ -913,15 +935,16 @@ static int mx1_prepare_message(struct spi_imx_data *spi_imx,
 }
 
 static int mx1_prepare_transfer(struct spi_imx_data *spi_imx,
-				struct spi_device *spi,
-				struct spi_transfer *t)
+				struct spi_device *spi)
 {
 	unsigned int reg = MX1_CSPICTRL_ENABLE | MX1_CSPICTRL_MASTER;
 	unsigned int clk;
 
-	reg |= spi_imx_clkdiv_2(spi_imx->spi_clk, t->speed_hz, &clk) <<
-		MX1_CSPICTRL_DR_SHIFT;
-	spi_imx->spi_bus_clk = clk;
+	if (!spi_imx->slave_mode) {
+		reg |= spi_imx_clkdiv_2(spi_imx->spi_clk, spi_imx->spi_bus_clk, &clk) <<
+			MX1_CSPICTRL_DR_SHIFT;
+		spi_imx->spi_bus_clk = clk;
+	}
 
 	reg |= spi_imx->bits_per_word - 1;
 
@@ -1218,6 +1241,8 @@ static int spi_imx_dma_configure(struct spi_master *master)
 	tx.dst_addr = spi_imx->base_phys + MXC_CSPITXDATA;
 	tx.dst_addr_width = buswidth;
 	tx.dst_maxburst = spi_imx->wml;
+	tx.peripheral_config = NULL;
+	tx.peripheral_size = 0;
 	ret = dmaengine_slave_config(master->dma_tx, &tx);
 	if (ret) {
 		dev_err(spi_imx->dev, "TX dma configuration failed with %d\n", ret);
@@ -1228,6 +1253,8 @@ static int spi_imx_dma_configure(struct spi_master *master)
 	rx.src_addr = spi_imx->base_phys + MXC_CSPIRXDATA;
 	rx.src_addr_width = buswidth;
 	rx.src_maxburst = spi_imx->wml;
+	rx.peripheral_config = NULL;
+	rx.peripheral_size = 0;
 	ret = dmaengine_slave_config(master->dma_rx, &rx);
 	if (ret) {
 		dev_err(spi_imx->dev, "RX dma configuration failed with %d\n", ret);
@@ -1244,6 +1271,16 @@ static int spi_imx_setupxfer(struct spi_device *spi,
 
 	if (!t)
 		return 0;
+
+	if (!t->speed_hz) {
+		if (!spi->max_speed_hz) {
+			dev_err(&spi->dev, "no speed_hz provided!\n");
+			return -EINVAL;
+		}
+		dev_dbg(&spi->dev, "using spi->max_speed_hz!\n");
+		spi_imx->spi_bus_clk = spi->max_speed_hz;
+	} else
+		spi_imx->spi_bus_clk = t->speed_hz;
 
 	spi_imx->bits_per_word = t->bits_per_word;
 
@@ -1286,7 +1323,7 @@ static int spi_imx_setupxfer(struct spi_device *spi,
 		spi_imx->slave_burst = t->len;
 	}
 
-	spi_imx->devtype_data->prepare_transfer(spi_imx, spi, t);
+	spi_imx->devtype_data->prepare_transfer(spi_imx, spi);
 
 	return 0;
 }
@@ -1551,14 +1588,14 @@ static int spi_imx_transfer(struct spi_device *spi,
 {
 	struct spi_imx_data *spi_imx = spi_master_get_devdata(spi->master);
 
-	transfer->effective_speed_hz = spi_imx->spi_bus_clk;
-
 	/* flush rxfifo before transfer */
 	while (spi_imx->devtype_data->rx_available(spi_imx))
 		readl(spi_imx->base + MXC_CSPIRXDATA);
 
 	if (spi_imx->slave_mode)
 		return spi_imx_pio_transfer_slave(spi, transfer);
+
+	transfer->effective_speed_hz = spi_imx->spi_bus_clk;
 
 	if (spi_imx->usedma)
 		return spi_imx_dma_transfer(spi_imx, transfer);
@@ -1661,6 +1698,7 @@ static int spi_imx_probe(struct platform_device *pdev)
 	spi_imx->bitbang.master = master;
 	spi_imx->dev = &pdev->dev;
 	spi_imx->slave_mode = slave_mode;
+	spi_imx->spi_bus_clk = MXC_SPI_DEFAULT_SPEED;
 
 	spi_imx->devtype_data = devtype_data;
 
@@ -1761,7 +1799,7 @@ static int spi_imx_probe(struct platform_device *pdev)
 	master->dev.of_node = pdev->dev.of_node;
 	ret = spi_bitbang_start(&spi_imx->bitbang);
 	if (ret) {
-		dev_err(&pdev->dev, "bitbang start failed with %d\n", ret);
+		dev_err_probe(&pdev->dev, ret, "bitbang start failed\n");
 		goto out_bitbang_start;
 	}
 

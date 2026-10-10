@@ -20,6 +20,7 @@
 #include <linux/list.h>
 #include <linux/mm.h>
 #include <linux/mm_types.h>
+#include <linux/module.h>
 #include <linux/rbtree.h>
 #include <linux/sched/task.h>
 #include <linux/slab.h>
@@ -272,6 +273,10 @@ static int ion_assign_heap_id(struct ion_heap *heap, struct ion_device *dev)
 		start_bit = __ffs(ION_HEAP_DMA_START);
 		end_bit = __ffs(ION_HEAP_DMA_END);
 		break;
+	case ION_HEAP_TYPE_UNMAPPED:
+		start_bit = __ffs(ION_HEAP_UNMAPPED_START);
+		end_bit = __ffs(ION_HEAP_UNMAPPED_END);
+		break;
 	case ION_HEAP_TYPE_CUSTOM ... ION_HEAP_TYPE_MAX:
 		start_bit = __ffs(ION_HEAP_CUSTOM_START);
 		end_bit = __ffs(ION_HEAP_CUSTOM_END);
@@ -516,4 +521,12 @@ err_reg:
 	kfree(idev);
 	return ret;
 }
+
+#ifdef CONFIG_ION_MODULE
+module_init(ion_device_create);
+#else
 subsys_initcall(ion_device_create);
+#endif
+
+MODULE_LICENSE("GPL v2");
+MODULE_DESCRIPTION("Ion memory allocator");

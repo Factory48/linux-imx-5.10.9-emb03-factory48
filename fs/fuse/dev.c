@@ -289,10 +289,10 @@ void fuse_request_end(struct fuse_req *req)
 
 	/*
 	 * test_and_set_bit() implies smp_mb() between bit
-	 * changing and below intr_entry check. Pairs with
+	 * changing and below FR_INTERRUPTED check. Pairs with
 	 * smp_mb() from queue_interrupt().
 	 */
-	if (!list_empty(&req->intr_entry)) {
+	if (test_bit(FR_INTERRUPTED, &req->flags)) {
 		spin_lock(&fiq->lock);
 		list_del_init(&req->intr_entry);
 		spin_unlock(&fiq->lock);
@@ -684,7 +684,11 @@ static void fuse_copy_finish(struct fuse_copy_state *cs)
 			flush_dcache_page(cs->pg);
 			set_page_dirty_lock(cs->pg);
 		}
-		put_page(cs->pg);
+		/*
+		 * The page could be GUP page(see iov_iter_get_pages in
+		 * fuse_copy_fill) so use put_user_page to release it.
+		 */
+		put_user_page(cs->pg);
 	}
 	cs->pg = NULL;
 }
@@ -784,6 +788,7 @@ static int fuse_check_page(struct page *page)
 	       1 << PG_uptodate |
 	       1 << PG_lru |
 	       1 << PG_active |
+	       1 << PG_workingset |
 	       1 << PG_reclaim |
 	       1 << PG_waiters))) {
 		dump_page(page, "fuse: trying to steal weird page");
@@ -1276,6 +1281,15 @@ static ssize_t fuse_dev_do_read(struct fuse_dev *fud, struct file *file,
 		goto restart;
 	}
 	spin_lock(&fpq->lock);
+	/*
+	 *  Must not put request on fpq->io queue after having been shut down by
+	 *  fuse_abort_conn()
+	 */
+	if (!fpq->connected) {
+		req->out.h.error = err = -ECONNABORTED;
+		goto out_end;
+
+	}
 	list_add(&req->list, &fpq->io);
 	spin_unlock(&fpq->lock);
 	cs->req = req;
@@ -1862,7 +1876,7 @@ static ssize_t fuse_dev_do_write(struct fuse_dev *fud,
 	}
 
 	err = -EINVAL;
-	if (oh.error <= -1000 || oh.error > 0)
+	if (oh.error <= -512 || oh.error > 0)
 		goto copy_finish;
 
 	spin_lock(&fpq->lock);
@@ -2244,8 +2258,7 @@ static long fuse_dev_ioctl(struct file *file, unsigned int cmd,
 {
 	int res;
 	int oldfd;
-	struct fuse_dev *fud;
-	struct fuse_passthrough_out pto;
+	struct fuse_dev *fud = NULL;
 
 	switch (cmd) {
 	case FUSE_DEV_IOC_CLONE:
@@ -2255,8 +2268,6 @@ static long fuse_dev_ioctl(struct file *file, unsigned int cmd,
 
 			res = -EINVAL;
 			if (old) {
-				fud = NULL;
-
 				/*
 				 * Check against file->f_op because CUSE
 				 * uses the same ioctl handler.
@@ -2277,13 +2288,11 @@ static long fuse_dev_ioctl(struct file *file, unsigned int cmd,
 		break;
 	case FUSE_DEV_IOC_PASSTHROUGH_OPEN:
 		res = -EFAULT;
-		if (!copy_from_user(&pto,
-				    (struct fuse_passthrough_out __user *)arg,
-				    sizeof(pto))) {
+		if (!get_user(oldfd, (__u32 __user *)arg)) {
 			res = -EINVAL;
 			fud = fuse_get_dev(file);
 			if (fud)
-				res = fuse_passthrough_open(fud, &pto);
+				res = fuse_passthrough_open(fud, oldfd);
 		}
 		break;
 	default:

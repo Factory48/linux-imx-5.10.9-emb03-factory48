@@ -479,7 +479,7 @@ static int mxc_gpio_irq_reqres(struct irq_data *d)
 		return -EINVAL;
 	}
 
-	return irq_chip_pm_get(d);
+	return 0;
 }
 
 static void mxc_gpio_irq_relres(struct irq_data *d)
@@ -488,7 +488,6 @@ static void mxc_gpio_irq_relres(struct irq_data *d)
 	struct mxc_gpio_port *port = gc->private;
 
 	gpiochip_unlock_as_irq(&port->gc, d->hwirq);
-	irq_chip_pm_put(d);
 }
 
 static int mxc_gpio_init_gc(struct mxc_gpio_port *port, int irq_base,
@@ -513,7 +512,7 @@ static int mxc_gpio_init_gc(struct mxc_gpio_port *port, int irq_base,
 	ct->chip.irq_set_wake = gpio_set_wake_irq;
 	ct->chip.irq_request_resources = mxc_gpio_irq_reqres;
 	ct->chip.irq_release_resources = mxc_gpio_irq_relres,
-	ct->chip.flags = IRQCHIP_MASK_ON_SUSPEND;
+	ct->chip.flags = IRQCHIP_MASK_ON_SUSPEND | IRQCHIP_ENABLE_WAKEUP_ON_SUSPEND;
 	ct->regs.ack = GPIO_ISR;
 	ct->regs.mask = GPIO_IMR;
 

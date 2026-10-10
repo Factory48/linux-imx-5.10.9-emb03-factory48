@@ -1229,8 +1229,14 @@ static int ov5640_init_mode(struct ov5640 *sensor,
 		return -1;
 	}
 
-	dn_mode = ov5640_mode_info_data[frame_rate][mode].dn_mode;
-	orig_dn_mode = ov5640_mode_info_data[frame_rate][orig_mode].dn_mode;
+	if (mode == ov5640_mode_INIT) {
+		dn_mode = 0;
+		orig_dn_mode = 0;
+	} else {
+		dn_mode = ov5640_mode_info_data[frame_rate][mode].dn_mode;
+		orig_dn_mode = ov5640_mode_info_data[frame_rate][orig_mode].dn_mode;
+	}
+
 	if (mode == ov5640_mode_INIT) {
 		pModeSetting = ov5640_init_setting_30fps_VGA;
 		ArySize = ARRAY_SIZE(ov5640_init_setting_30fps_VGA);
@@ -1561,7 +1567,7 @@ static int ov5640_enum_frameintervals(struct v4l2_subdev *sd,
 	struct device *dev = &client->dev;
 	int i, j, count = 0;
 
-	if (fie->index < 0 || fie->index > ov5640_mode_MAX)
+	if (fie->index > ov5640_mode_MAX)
 		return -EINVAL;
 
 	if (fie->width == 0 || fie->height == 0 ||

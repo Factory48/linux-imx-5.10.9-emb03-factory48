@@ -7,10 +7,14 @@ LINUX_GCC_CROSS_COMPILE_PREBUILTS_BIN=prebuilts/gas/linux-x86
 MAKE_GOALS="
 bzImage
 modules
+prepare-objtool
 "
 
 FILES="
 arch/x86/boot/bzImage
 vmlinux
 System.map
+vmlinux.symvers
+modules.builtin
+modules.builtin.modinfo
 "

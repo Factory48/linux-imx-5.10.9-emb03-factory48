@@ -13,6 +13,8 @@
 
 #define DECLARE_HOOK DECLARE_TRACE
 
+int android_rvh_probe_register(struct tracepoint *tp, void *probe, void *data);
+
 #ifdef TRACE_HEADER_MULTI_READ
 
 #define DEFINE_HOOK_FN(_name, _reg, _unreg, proto, args)		\
@@ -31,16 +33,18 @@
 		.unregfunc = _unreg,					\
 		.funcs = NULL };					\
 	__TRACEPOINT_ENTRY(_name);					\
-	int __traceiter_##_name(void *__data, proto)			\
+	int __nocfi __traceiter_##_name(void *__data, proto)			\
 	{								\
 		struct tracepoint_func *it_func_ptr;			\
 		void *it_func;						\
 									\
 		it_func_ptr = (&__tracepoint_##_name)->funcs;		\
 		it_func = (it_func_ptr)->func;				\
-		__data = (it_func_ptr)->data;				\
-		((void(*)(void *, proto))(it_func))(__data, args);	\
-		WARN_ON(((++it_func_ptr)->func));			\
+		do {							\
+			__data = (it_func_ptr)->data;			\
+			((void(*)(void *, proto))(it_func))(__data, args); \
+			it_func = READ_ONCE((++it_func_ptr)->func);	\
+		} while (it_func);					\
 		return 0;						\
 	}								\
 	DEFINE_STATIC_CALL(tp_func_##_name, __traceiter_##_name);
@@ -88,11 +92,8 @@
 	static inline int						\
 	register_trace_##name(void (*probe)(data_proto), void *data) 	\
 	{								\
-		/* only allow a single attachment */			\
-		if (trace_##name##_enabled())				\
-			return -EBUSY;					\
-		return tracepoint_probe_register(&__tracepoint_##name,	\
-						(void *)probe, data);	\
+		return android_rvh_probe_register(&__tracepoint_##name,	\
+						  (void *)probe, data);	\
 	}								\
 	/* vendor hooks cannot be unregistered */			\
 

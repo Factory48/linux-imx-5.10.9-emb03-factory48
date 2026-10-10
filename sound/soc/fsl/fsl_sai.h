@@ -7,6 +7,7 @@
 #define __FSL_SAI_H
 
 #include <linux/pm_qos.h>
+#include <linux/platform_data/dma-imx.h>
 #include <sound/dmaengine_pcm.h>
 
 #define FSL_SAI_FORMATS (SNDRV_PCM_FMTBIT_S16_LE |\
@@ -230,6 +231,7 @@ struct fsl_sai_soc_data {
 	unsigned int fifos;
 	unsigned int dataline;
 	unsigned int flags;
+	unsigned int max_register;
 };
 
 /**
@@ -261,7 +263,8 @@ struct fsl_sai_param {
 struct fsl_sai_dl_cfg {
 	unsigned int pins;
 	unsigned int mask[2];
-	unsigned int offset[2];
+	unsigned int start_off[2];
+	unsigned int next_off[2];
 };
 
 struct fsl_sai {
@@ -272,6 +275,7 @@ struct fsl_sai {
 	struct clk *mclk_clk[FSL_SAI_MCLK_MAX];
 	struct clk *pll8k_clk;
 	struct clk *pll11k_clk;
+	struct resource *res;
 
 	bool slave_mode[2];
 	bool is_lsb_first;
@@ -303,6 +307,7 @@ struct fsl_sai {
 	struct fsl_sai_verid verid;
 	struct fsl_sai_param param;
 	struct pm_qos_request pm_qos_req;
+	struct sdma_audio_config audio_config[2];
 	struct pinctrl *pinctrl;
 	struct pinctrl_state *pins_state;
 };
