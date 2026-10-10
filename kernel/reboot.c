@@ -17,6 +17,18 @@
 #include <linux/syscalls.h>
 #include <linux/syscore_ops.h>
 #include <linux/uaccess.h>
+#include <linux/sched.h>
+#include <linux/ktime.h>
+
+static void reset_diagnostic(const char *path, const char *cmd)
+{
+	if (!IS_ENABLED(CONFIG_IMX2_WDT_RESET_DIAGNOSTICS))
+		return;
+	pr_emerg("RESETDIAG %s ns=%llu pid=%d comm=%s cmd=%s\n",
+		 path, ktime_get_ns(), task_pid_nr(current), current->comm,
+		 cmd ? cmd : "(none)");
+	dump_stack();
+}
 
 /*
  * this indicates whether you can reboot with ctrl-alt-del: the default is yes
@@ -65,6 +77,7 @@ EXPORT_SYMBOL_GPL(pm_power_off_prepare);
  */
 void emergency_restart(void)
 {
+	reset_diagnostic("emergency_restart", NULL);
 	kmsg_dump(KMSG_DUMP_EMERG);
 	machine_emergency_restart();
 }
@@ -72,6 +85,7 @@ EXPORT_SYMBOL_GPL(emergency_restart);
 
 void kernel_restart_prepare(char *cmd)
 {
+	reset_diagnostic("kernel_restart_prepare", cmd);
 	blocking_notifier_call_chain(&reboot_notifier_list, SYS_RESTART, cmd);
 	system_state = SYSTEM_RESTART;
 	usermodehelper_disable();
@@ -288,6 +302,7 @@ EXPORT_SYMBOL_GPL(kernel_halt);
  */
 void kernel_power_off(void)
 {
+	reset_diagnostic("kernel_power_off", NULL);
 	kernel_shutdown_prepare(SYSTEM_POWER_OFF);
 	if (pm_power_off_prepare)
 		pm_power_off_prepare();

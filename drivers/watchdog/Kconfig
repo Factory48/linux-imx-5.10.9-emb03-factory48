@@ -724,6 +724,15 @@ config IMX2_WDT
 	  To compile this driver as a module, choose M here: the
 	  module will be called imx2_wdt.
 
+config IMX2_WDT_RESET_DIAGNOSTICS
+	bool "Automatic i.MX reset diagnostics (test builds only)"
+	depends on IMX2_WDT=y
+	help
+	  Log watchdog feed entry/completion, early reset status and software
+	  restart callers. Arm a five-second hardware pretimeout interrupt when
+	  the configured timeout permits it. The interrupt dumps the local stack
+	  without feeding the watchdog or changing its reset deadline.
+
 config IMX_SC_WDT
 	tristate "IMX SC Watchdog"
 	depends on HAVE_ARM_SMCCC

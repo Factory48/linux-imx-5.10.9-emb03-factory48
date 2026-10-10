@@ -30,6 +30,8 @@
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/watchdog.h>
+#include <linux/sched.h>
+#include <linux/ktime.h>
 
 #define DRIVER_NAME "imx2-wdt"
 
@@ -93,6 +95,12 @@ static int imx2_wdt_restart(struct watchdog_device *wdog, unsigned long action,
 {
 	struct imx2_wdt_device *wdev = watchdog_get_drvdata(wdog);
 	unsigned int wcr_enable = IMX2_WDT_WCR_WDE;
+
+	if (IS_ENABLED(CONFIG_IMX2_WDT_RESET_DIAGNOSTICS)) {
+		pr_emerg("RESETDIAG imx2_restart ns=%llu pid=%d comm=%s\n",
+			 ktime_get_ns(), task_pid_nr(current), current->comm);
+		dump_stack();
+	}
 
 	/* Use internal reset or external - not both */
 	if (wdev->ext_reset)
@@ -159,10 +167,17 @@ static inline bool imx2_wdt_is_running(struct imx2_wdt_device *wdev)
 static int imx2_wdt_ping(struct watchdog_device *wdog)
 {
 	struct imx2_wdt_device *wdev = watchdog_get_drvdata(wdog);
+	int ret;
 
-	regmap_write(wdev->regmap, IMX2_WDT_WSR, IMX2_WDT_SEQ1);
-	regmap_write(wdev->regmap, IMX2_WDT_WSR, IMX2_WDT_SEQ2);
-	return 0;
+	if (IS_ENABLED(CONFIG_IMX2_WDT_RESET_DIAGNOSTICS))
+		printk_deferred(KERN_INFO "RESETDIAG feed begin ns=%llu pid=%d comm=%s\n",
+			ktime_get_ns(), task_pid_nr(current), current->comm);
+	ret = regmap_write(wdev->regmap, IMX2_WDT_WSR, IMX2_WDT_SEQ1);
+	if (!ret)
+		ret = regmap_write(wdev->regmap, IMX2_WDT_WSR, IMX2_WDT_SEQ2);
+	if (IS_ENABLED(CONFIG_IMX2_WDT_RESET_DIAGNOSTICS))
+		printk_deferred(KERN_INFO "RESETDIAG feed end ns=%llu ret=%d\n", ktime_get_ns(), ret);
+	return ret;
 }
 
 static void __imx2_wdt_set_timeout(struct watchdog_device *wdog,
@@ -174,14 +189,30 @@ static void __imx2_wdt_set_timeout(struct watchdog_device *wdog,
 			   WDOG_SEC_TO_COUNT(new_timeout));
 }
 
+static int imx2_wdt_set_pretimeout(struct watchdog_device *wdog,
+				unsigned int new_pretimeout);
+
 static int imx2_wdt_set_timeout(struct watchdog_device *wdog,
 				unsigned int new_timeout)
 {
+	struct imx2_wdt_device *wdev = watchdog_get_drvdata(wdog);
 	unsigned int actual;
 
 	actual = min(new_timeout, IMX2_WDT_MAX_TIME);
 	__imx2_wdt_set_timeout(wdog, actual);
 	wdog->timeout = new_timeout;
+	if (IS_ENABLED(CONFIG_IMX2_WDT_RESET_DIAGNOSTICS) &&
+	    (wdog->info->options & WDIOF_PRETIMEOUT)) {
+		unsigned int pretimeout = actual > 5 ? 5 : 0;
+		int ret = imx2_wdt_set_pretimeout(wdog, pretimeout);
+		unsigned int wicr = 0;
+		int read_ret = regmap_read(wdev->regmap, IMX2_WDT_WICR, &wicr);
+
+		pr_info("RESETDIAG timeout=%u hardware=%u pretimeout_request=%u ret=%d WICR=%#x read_ret=%d\n",
+			new_timeout, actual, pretimeout, ret, wicr, read_ret);
+		if (ret)
+			return ret;
+	}
 	return 0;
 }
 
@@ -189,15 +220,27 @@ static int imx2_wdt_set_pretimeout(struct watchdog_device *wdog,
 				   unsigned int new_pretimeout)
 {
 	struct imx2_wdt_device *wdev = watchdog_get_drvdata(wdog);
+	unsigned int value;
+	int ret;
 
 	if (new_pretimeout >= IMX2_WDT_MAX_TIME)
 		return -EINVAL;
 
-	wdog->pretimeout = new_pretimeout;
-
-	regmap_update_bits(wdev->regmap, IMX2_WDT_WICR,
-			   IMX2_WDT_WICR_WIE | IMX2_WDT_WICR_WICT,
-			   IMX2_WDT_WICR_WIE | (new_pretimeout << 1));
+	value = (new_pretimeout ? IMX2_WDT_WICR_WIE : 0) |
+		(new_pretimeout << 1);
+	/* WTIS is write-one-to-clear; configuration must not acknowledge it. */
+	ret = regmap_update_bits(wdev->regmap, IMX2_WDT_WICR,
+		IMX2_WDT_WICR_WIE | IMX2_WDT_WICR_WICT | IMX2_WDT_WICR_WTIS,
+		value);
+	if (ret)
+		return ret;
+	ret = regmap_read(wdev->regmap, IMX2_WDT_WICR, &value);
+	if (ret)
+		return ret;
+	wdog->pretimeout = value & IMX2_WDT_WICR_WIE ?
+		(value & IMX2_WDT_WICR_WICT) / 2 : 0;
+	if (wdog->pretimeout != new_pretimeout)
+		return -EIO;
 	return 0;
 }
 
@@ -205,6 +248,13 @@ static irqreturn_t imx2_wdt_isr(int irq, void *wdog_arg)
 {
 	struct watchdog_device *wdog = wdog_arg;
 	struct imx2_wdt_device *wdev = watchdog_get_drvdata(wdog);
+
+	if (IS_ENABLED(CONFIG_IMX2_WDT_RESET_DIAGNOSTICS)) {
+		pr_emerg("RESETDIAG pretimeout ns=%llu cpu=%u pid=%d comm=%s\n",
+			 ktime_get_ns(), raw_smp_processor_id(),
+			 task_pid_nr(current), current->comm);
+		dump_stack();
+	}
 
 	regmap_write_bits(wdev->regmap, IMX2_WDT_WICR,
 			  IMX2_WDT_WICR_WTIS, IMX2_WDT_WICR_WTIS);
@@ -303,6 +353,14 @@ static int __init imx2_wdt_probe(struct platform_device *pdev)
 
 	regmap_read(wdev->regmap, IMX2_WDT_WRSR, &val);
 	wdog->bootstatus = val & IMX2_WDT_WRSR_TOUT ? WDIOF_CARDRESET : 0;
+	if (IS_ENABLED(CONFIG_IMX2_WDT_RESET_DIAGNOSTICS)) {
+		unsigned int wcr = 0, wicr = 0;
+
+		regmap_read(wdev->regmap, IMX2_WDT_WCR, &wcr);
+		regmap_read(wdev->regmap, IMX2_WDT_WICR, &wicr);
+		dev_emerg(dev, "RESETDIAG probe WRSR=%#x WCR=%#x WICR=%#x\n",
+			  val, wcr, wicr);
+	}
 
 	wdev->ext_reset = of_property_read_bool(dev->of_node,
 						"fsl,ext-reset-output");

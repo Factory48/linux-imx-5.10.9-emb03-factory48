@@ -37,6 +37,35 @@ reboot loop. DT migration has offline behavioral checks; audio capture, IRQ/PM
 behavior and reboot stability still require separately authorized hardware tests.
 Never install the kernel alone with an unmigrated DT or unmatched modules.
 
+## Automatic reset diagnostics (test build)
+
+`CONFIG_IMX2_WDT_RESET_DIAGNOSTICS` logs `RESETDIAG` events from early probe,
+watchdog feed entry and completion, hardware pretimeout, software restart,
+emergency restart, power-off and panic. Successful feed completion means both
+regmap writes returned, not an independently measured hardware counter reload.
+The existing watchdogd's SETTIMEOUT requests a five-second pretimeout when an
+IRQ is available and the timeout exceeds five seconds. Shorter timeouts request
+disable. WICR is read back, the observed value is logged, and a mismatch is
+reported rather than claiming the pretimeout was armed (firmware may have
+locked its configuration). Feed messages use deferred printk to avoid draining
+the serial console on the feed path.
+The pretimeout logs the interrupted CPU's stack, does not feed or panic, and
+leaves the original reset deadline intact. It cannot diagnose a CPU that masks
+the IRQ or a power loss. No cross-CPU backtrace guarantee is made.
+
+The diagnostic defconfig uses a 4 MiB printk ring, watchdog sysfs, the softlockup
+detector and a ten-second initial hung-task threshold; detector-triggered panic
+is disabled. Android init may write hung_task_timeout_secs=0, disabling that
+detector after boot; the collector records the effective value, and no Android
+hung-task coverage is claimed without a nonzero readback. Watchdog pretimeout
+and software-reset attribution do not depend on this sysctl. This build does
+not reserve RAM for ramoops or promise DDR survives a PMIC cold reset.
+Capture starts when ADB first enumerates, not at boot completion:
+the workspace `scripts/capture-early-boot-adb.py` streams logcat, `dmesg -w` and
+one-second lightweight state samples concurrently, writes host arrival times,
+and reconnects into separate cycle directories. It never clears logs, pushes
+files, reboots, changes watchdog ownership, or modifies the device.
+
 ---
 
 ## Key Hardware Features & Integrated Drivers

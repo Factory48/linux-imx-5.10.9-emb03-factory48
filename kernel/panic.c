@@ -223,6 +223,9 @@ void panic(const char *fmt, ...)
 		buf[len - 1] = '\0';
 
 	pr_emerg("Kernel panic - not syncing: %s\n", buf);
+	if (IS_ENABLED(CONFIG_IMX2_WDT_RESET_DIAGNOSTICS))
+		pr_emerg("RESETDIAG panic cpu=%d pid=%d comm=%s\n",
+			 this_cpu, task_pid_nr(current), current->comm);
 #ifdef CONFIG_DEBUG_BUGVERBOSE
 	/*
 	 * Avoid nested stack-dumping if a panic occurs during oops processing
