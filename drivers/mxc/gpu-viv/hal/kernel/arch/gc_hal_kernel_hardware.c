@@ -13840,7 +13840,8 @@ gckHARDWARE_ExecuteFunctions(
         /* Wait until GPU idle. */
         do
         {
-            gckOS_Udelay(hardware->os, delay);
+            /* timer and kernel->timeOut are expressed in milliseconds. */
+            gckOS_Delay(hardware->os, delay);
 
             gcmkONERROR(gckOS_ReadRegisterEx(
                 hardware->os,
