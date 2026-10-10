@@ -39,7 +39,8 @@ jobs:
       LLVM_IAS: 1
       CROSS_COMPILE: aarch64-linux-gnu-
       CLANG_TRIPLE: aarch64-linux-gnu-
-      KCFLAGS: -Werror=incompatible-pointer-types
+      # NXP 2.6.0 common/build/kernel.mk: KERNEL_CFLAGS := -Wno-incompatible-pointer-types whenever clang builds
+      KCFLAGS: -Wno-incompatible-pointer-types
       LOCALVERSION: ""
       KBUILD_BUILD_USER: Factory48
       KBUILD_BUILD_HOST: factory48-ci
@@ -101,19 +102,21 @@ jobs:
           ln -sf /usr/bin/ccache "${{ github.workspace }}/.ccache-bin/g++"
           ccache --set-config=max_size=2.5G
           ccache --set-config=compression=true
-          echo "${{ github.workspace }}/.ccache-bin" >> $GITHUB_PATH
+          # GitHub prepends GITHUB_PATH entries in reverse order: write the toolchain first so the ccache
+          # wrappers end up ahead of it (before this, ccache was never invoked: 0 hits / 0 misses).
           echo "${{ env.TOOLCHAIN_DIR }}/bin" >> $GITHUB_PATH
+          echo "${{ github.workspace }}/.ccache-bin" >> $GITHUB_PATH
+          # NXP 2.6.0 kernel.mk builds with CCACHE_NODIRECT=true
+          echo "CCACHE_NODIRECT=true" >> $GITHUB_ENV
 
       - name: Restore Ccache
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-kernel-${{ github.ref_name }}-${{ github.sha }}
+          key: ccache-kernel-${{ env.CLANG_VERSION }}-${{ github.ref_name }}-${{ github.sha }}
           restore-keys: |
-            ccache-kernel-${{ github.ref_name }}-
-            ccache-kernel-emb03-factory48-
-            ccache-kernel-main-
-            ccache-kernel-
+            ccache-kernel-${{ env.CLANG_VERSION }}-${{ github.ref_name }}-
+            ccache-kernel-${{ env.CLANG_VERSION }}-
 
       - name: Zero Ccache Statistics
         run: |
@@ -166,7 +169,7 @@ jobs:
           set -o pipefail
           make -C "$GITHUB_WORKSPACE" O="$GITHUB_WORKSPACE/build/out" \
             ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
-            KCFLAGS="-Werror=incompatible-pointer-types" \
+            KCFLAGS="$KCFLAGS" \
             -j"$NPROC" $KEEP $TARGETS 2>&1 | tee build/build.log
 
       - name: Error Summary

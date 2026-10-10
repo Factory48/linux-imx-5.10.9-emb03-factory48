@@ -65,7 +65,7 @@ make O=build/out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
 # 3. Build kernel Image and modules
 make O=build/out ARCH=arm64 LLVM=1 LLVM_IAS=1 \
      CROSS_COMPILE=aarch64-linux-gnu- \
-     KCFLAGS="-Werror=incompatible-pointer-types" \
+     KCFLAGS="-Wno-incompatible-pointer-types" \
      -j$(nproc) Image modules
 ```
 
