@@ -63,6 +63,15 @@
 #define _GC_OBJ_ZONE    gcvZONE_HARDWARE
 
 /*
+ * EMB03: value written to AQ_HI_CLOCK_CONTROL (0x00000) in Construct,
+ * InitializeHardware and _ResetGPU. 6.4.3.p2 changed it to 0x00070900 (CL366927,
+ * bits 17/18 additionally set); 6.4.3.p1 used 0x00010900. On the i.MX8MP
+ * VIPnano-si+ (0x8000/0x8002) p2 hangs the SH pipeline during the flop-reset
+ * programs, p1 does not. Keep the p1 value.
+ */
+#define gcdHI_CLOCK_CONTROL_RESET_VALUE 0x00010900
+
+/*
 There is a afifo that is receiving the “write-done” signal coming from AXI bus for each write request from GPU.
 In normal situation, these “write-done” are coming back in several cycles apart since the write request is generally multiple bursts.
 Things are working as expected in normal frequency working mode for AXI and GPU core clock.
@@ -2115,7 +2124,7 @@ gckHARDWARE_Construct(
     gcmkONERROR(gckOS_WriteRegisterEx(Os,
                                       Core,
                                       0x00000,
-                                      0x00070900));
+                                      gcdHI_CLOCK_CONTROL_RESET_VALUE));
 
     /* Allocate the gckHARDWARE object. */
     gcmkONERROR(gckOS_Allocate(Os,
@@ -2625,7 +2634,7 @@ gckHARDWARE_InitializeHardware(
     gcmkONERROR(gckOS_WriteRegisterEx(Hardware->os,
                                       Hardware->core,
                                       0x00000,
-                                      ((((gctUINT32) (0x00070900)) & ~(((gctUINT32) (((gctUINT32) ((((1 ?
+                                      ((((gctUINT32) (gcdHI_CLOCK_CONTROL_RESET_VALUE)) & ~(((gctUINT32) (((gctUINT32) ((((1 ?
  19:19) - (0 ?
  19:19) + 1) == 32) ?
  ~0U : (~(~0U << ((1 ?
@@ -3430,9 +3439,6 @@ gckHARDWARE_InitializeHardware(
 #if gcdDEBUG_MODULE_CLOCK_GATING
     _ConfigureModuleLevelClockGating(Hardware);
 #endif
-
-    gcmkONERROR(gckOS_WriteRegisterEx(
-        Hardware->os, Hardware->core, 0x00014, 0xFFFFFFFF));
 
     /* Perfrom hardware functions */
     for (i = 0; i < gcvFUNCTION_EXECUTION_NUM; i++)
@@ -11823,7 +11829,7 @@ _ResetGPU(
         gcmkONERROR(gckOS_WriteRegisterEx(Os,
                     Core,
                     0x00000,
-                    ((((gctUINT32) (0x00070900)) & ~(((gctUINT32) (((gctUINT32) ((((1 ?
+                    ((((gctUINT32) (gcdHI_CLOCK_CONTROL_RESET_VALUE)) & ~(((gctUINT32) (((gctUINT32) ((((1 ?
  9:9) - (0 ?
  9:9) + 1) == 32) ?
  ~0U : (~(~0U << ((1 ?
@@ -11837,13 +11843,13 @@ _ResetGPU(
         gcmkONERROR(gckOS_WriteRegisterEx(Os,
                     Core,
                     0x00000,
-                    0x00070900));
+                    gcdHI_CLOCK_CONTROL_RESET_VALUE));
 
         /* Wait for clock being stable. */
         gcmkONERROR(gckOS_Delay(Os, 1));
 
         /* Isolate the GPU. */
-        control = ((((gctUINT32) (0x00070900)) & ~(((gctUINT32) (((gctUINT32) ((((1 ?
+        control = ((((gctUINT32) (gcdHI_CLOCK_CONTROL_RESET_VALUE)) & ~(((gctUINT32) (((gctUINT32) ((((1 ?
  19:19) - (0 ?
  19:19) + 1) == 32) ?
  ~0U : (~(~0U << ((1 ?
@@ -13786,7 +13792,7 @@ gckHARDWARE_ExecuteFunctions(
 {
     gceSTATUS status;
     gctUINT32 idle;
-    gctUINT32 i, timer = 0, delay = 10;
+    gctUINT32 i, timer = 0, delay = 1;
     gctUINT32 address;
     gckHARDWARE hardware = (gckHARDWARE)Execution->hardware;
 
