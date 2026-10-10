@@ -17,8 +17,13 @@ and embed the same output in **both** `vendor_boot` and `dtbo`, rebuilding their
 AVB descriptors. The tool removes CCM clock 111's assignment, wires SDMA2 to
 `IMX8MP_CLK_AUDIO_AHB_ROOT` for both clocks, and selects the i.MX8MP SAI3/SAI5
 bindings. All other properties, including the input's NPU policy, are preserved.
-The workspace `build-emb03-k5.10.72-ota.py` performs this migration automatically;
-its source baseline remains sleep-p4, **not v12**. Do not reuse its delta on v12.
+The workspace `build-emb03-k5.10.72-ota.py` performs this migration automatically.
+It requires `--source-dir`, `--source-manifest` (eight full-partition size/hash
+records) and a fresh `--name`; it never guesses a sleep-p4 or v12 baseline.
+The input DT's NPU policy is preserved. Kernel-repair deltas reject a change in
+NPU policy, obsolete target DTs, or a source image whose full hash does not match.
+For a DT-only source such as r3, supply inherited boot/vendor images explicitly
+with the delta builder's `--source-images`; every inherited image is hash-checked.
 
 SDMA rejects missing clocks rather than silently programming the wrong ratio.
 Runtime-PM SDMA controllers handle interrupts in an ONESHOT IRQ thread, check
