@@ -301,6 +301,14 @@ static struct platform_driver regulator_fixed_voltage_driver = {
 		.name		= "reg-fixed-voltage",
 		.of_match_table = of_match_ptr(fixed_of_match),
 		.pm = &reg_fixed_voltage_pm_ops,
+		/*
+		 * EMB03: gpio-leds borrows regulator-usdhc2's enable GPIO
+		 * (see leds-gpio.c) and relies on a device link to unbind
+		 * first. Remove the sysfs bind/unbind files so two concurrent
+		 * userspace unbinds cannot overlap that teardown.
+		 */
+		.suppress_bind_attrs =
+			IS_ENABLED(CONFIG_LEDS_GPIO_EMB03_SHARED_RAIL),
 	},
 };
 

@@ -15,6 +15,9 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
+#include <linux/of_gpio.h>
+#include <linux/of_platform.h>
+#include <linux/gpio/driver.h>
 #include <linux/slab.h>
 
 struct gpio_led_data {
@@ -122,8 +125,113 @@ static int create_gpio_led(const struct gpio_led *template,
 
 struct gpio_leds_priv {
 	int num_leds;
+	bool shared_rail;
 	struct gpio_led_data leds[];
 };
+
+/*
+ * EMB03 (CONFIG_LEDS_GPIO_EMB03_SHARED_RAIL): the gpio-leds children on this
+ * board are power switches (4G power/key/wake, boost, 5V, TF-card rail, ...),
+ * not LEDs, and all of them must exist and stay controllable.
+ *
+ * The factory DT names GPIO2_IO19 in both /gpio-leds/NVCC_SD2 and the
+ * /regulator-usdhc2 fixed regulator (enable-active-high, regulator-always-on).
+ * On 5.10.9 gpio-leds requested the line first and the regulator shared it
+ * (fixed regulators request with GPIOD_FLAGS_BIT_NONEXCLUSIVE). On 5.10.72 the
+ * regulator requests it first, the exclusive request returns -EBUSY and the
+ * whole gpio-leds probe failed, unwinding every switch to off.
+ *
+ * For exactly that DT pair, gpio-leds reuses the regulator's descriptor:
+ * - the regulator device is locked while it is verified to be bound to
+ *   reg-fixed-voltage and to hold the request, and while a managed device link
+ *   (gpio-leds consumer) is added, so it cannot be mid-unbind and must unbind
+ *   gpio-leds before it can release the line;
+ * - every LED is unregistered from ->remove() and on probe failure, while that
+ *   link still blocks the regulator, instead of later from devres (after
+ *   driver core has already dropped the link).
+ * No new request is taken; the owner's label stays. Any other busy GPIO still
+ * fails the probe, and the code is inert unless the option is enabled.
+ */
+static struct gpio_desc *emb03_share_rail_gpio(struct device *dev,
+					       struct fwnode_handle *child)
+{
+	struct gpio_desc *ret = ERR_PTR(-EBUSY);
+	struct device_node *np = to_of_node(child);
+	struct platform_device *reg_pdev;
+	struct device_node *reg_np;
+	enum of_gpio_flags flags;
+	struct gpio_desc *desc;
+	struct device *reg_dev;
+	struct gpio_chip *gc;
+	const char *label;
+	const char *owner;
+	int gpio;
+
+	if (!IS_ENABLED(CONFIG_LEDS_GPIO_EMB03_SHARED_RAIL) || !np ||
+	    of_property_read_string(np, "label", &label) ||
+	    strcmp(label, "NVCC_SD2"))
+		return ret;
+	gpio = of_get_named_gpio_flags(np, "gpios", 0, &flags);
+	if (!gpio_is_valid(gpio) || (flags & OF_GPIO_ACTIVE_LOW))
+		return ret;
+
+	reg_np = of_find_node_by_path("/regulator-usdhc2");
+	if (!reg_np)
+		return ret;
+	if (!of_device_is_compatible(reg_np, "regulator-fixed") ||
+	    !of_property_read_bool(reg_np, "enable-active-high") ||
+	    !of_property_read_bool(reg_np, "regulator-always-on") ||
+	    of_get_named_gpio(reg_np, "gpio", 0) != gpio) {
+		of_node_put(reg_np);
+		return ret;
+	}
+	reg_pdev = of_find_device_by_node(reg_np);
+	of_node_put(reg_np);
+	if (!reg_pdev)
+		return ret;
+	reg_dev = &reg_pdev->dev;
+
+	/*
+	 * The regulator releases the line only from its own probe failure or
+	 * unbind, both under its device lock; unbind first marks it
+	 * DL_DEV_UNBINDING under that lock. Bound + locked: the request and its
+	 * label are stable, and the link below makes its unbind wait for ours.
+	 */
+	device_lock(reg_dev);
+	if (reg_dev->links.status != DL_DEV_DRIVER_BOUND || !reg_dev->driver ||
+	    strcmp(reg_dev->driver->name, "reg-fixed-voltage"))
+		goto unlock;
+	desc = gpio_to_desc(gpio);
+	gc = desc ? gpiod_to_chip(desc) : NULL;
+	if (!gc)
+		goto unlock;
+	owner = gpiochip_is_requested(gc, gpio - gc->base);
+	if (!owner || strcmp(owner, dev_name(reg_dev)) ||
+	    gpiod_is_active_low(desc))
+		goto unlock;
+	if (!device_link_add(dev, reg_dev, DL_FLAG_AUTOREMOVE_CONSUMER))
+		goto unlock;
+
+	dev_info(dev, "%s: sharing GPIO %d with %s\n", label, gpio,
+		 dev_name(reg_dev));
+	ret = desc;
+unlock:
+	device_unlock(reg_dev);
+	put_device(reg_dev);
+	return ret;
+}
+
+/*
+ * Unregister every LED now, while the device link to the rail owner is still
+ * active, so the final brightness writes cannot race the owner's unbind.
+ */
+static void gpio_leds_unregister_shared(struct device *dev,
+					struct gpio_leds_priv *priv)
+{
+	while (priv->num_leds)
+		devm_led_classdev_unregister(dev,
+				&priv->leds[--priv->num_leds].cdev);
+}
 
 static struct gpio_leds_priv *gpio_leds_create(struct platform_device *pdev)
 {
@@ -144,6 +252,7 @@ static struct gpio_leds_priv *gpio_leds_create(struct platform_device *pdev)
 		struct gpio_led_data *led_dat = &priv->leds[priv->num_leds];
 		struct gpio_led led = {};
 		const char *state = NULL;
+		bool shared = false;
 
 		/*
 		 * Acquire gpiod from DT with uninitialized label, which
@@ -153,9 +262,14 @@ static struct gpio_leds_priv *gpio_leds_create(struct platform_device *pdev)
 		led.gpiod = devm_fwnode_get_gpiod_from_child(dev, NULL, child,
 							     GPIOD_ASIS,
 							     NULL);
+		if (PTR_ERR_OR_ZERO(led.gpiod) == -EBUSY) {
+			led.gpiod = emb03_share_rail_gpio(dev, child);
+			shared = !IS_ERR(led.gpiod);
+			priv->shared_rail |= shared;
+		}
 		if (IS_ERR(led.gpiod)) {
-			fwnode_handle_put(child);
-			return ERR_CAST(led.gpiod);
+			ret = PTR_ERR(led.gpiod);
+			goto err;
 		}
 
 		led_dat->gpiod = led.gpiod;
@@ -178,17 +292,26 @@ static struct gpio_leds_priv *gpio_leds_create(struct platform_device *pdev)
 			led.panic_indicator = 1;
 
 		ret = create_gpio_led(&led, led_dat, dev, child, NULL);
-		if (ret < 0) {
-			fwnode_handle_put(child);
-			return ERR_PTR(ret);
-		}
-		/* Set gpiod label to match the corresponding LED name. */
-		gpiod_set_consumer_name(led_dat->gpiod,
-					led_dat->cdev.dev->kobj.name);
+		if (ret < 0)
+			goto err;
+		/*
+		 * Set gpiod label to match the corresponding LED name. A shared
+		 * line keeps its owner's label (the owner holds the request).
+		 */
+		if (!shared)
+			gpiod_set_consumer_name(led_dat->gpiod,
+						led_dat->cdev.dev->kobj.name);
 		priv->num_leds++;
 	}
 
 	return priv;
+
+err:
+	fwnode_handle_put(child);
+	/* Driver core drops the device link before devres runs. */
+	if (priv->shared_rail)
+		gpio_leds_unregister_shared(dev, priv);
+	return ERR_PTR(ret);
 }
 
 static const struct of_device_id of_gpio_leds_match[] = {
@@ -303,8 +426,19 @@ static void gpio_led_shutdown(struct platform_device *pdev)
 	}
 }
 
+static int gpio_led_remove(struct platform_device *pdev)
+{
+	struct gpio_leds_priv *priv = platform_get_drvdata(pdev);
+
+	/* Driver core drops the device link right after ->remove(). */
+	if (priv->shared_rail)
+		gpio_leds_unregister_shared(&pdev->dev, priv);
+	return 0;
+}
+
 static struct platform_driver gpio_led_driver = {
 	.probe		= gpio_led_probe,
+	.remove		= gpio_led_remove,
 	.shutdown	= gpio_led_shutdown,
 	.driver		= {
 		.name	= "leds-gpio",

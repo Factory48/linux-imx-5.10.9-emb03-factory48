@@ -371,6 +371,16 @@ config LEDS_GPIO
 	  defined as platform devices and/or OpenFirmware platform devices.
 	  The code to use these bindings can be selected below.
 
+config LEDS_GPIO_EMB03_SHARED_RAIL
+	bool "EMB03: share the NVCC_SD2 rail GPIO with regulator-usdhc2"
+	depends on LEDS_GPIO=y && REGULATOR_FIXED_VOLTAGE=y && OF_GPIO
+	help
+	  The EMB03 factory device tree drives board power switches through
+	  gpio-leds and names GPIO2_IO19 in both the NVCC_SD2 child and the
+	  always-on regulator-usdhc2 fixed regulator. Let gpio-leds reuse
+	  the regulator's descriptor for that one pair so all switches probe,
+	  as on the factory 5.10.9 kernel. Say N for any other board.
+
 config LEDS_LP3944
 	tristate "LED Support for N.S. LP3944 (Fun Light) I2C chip"
 	depends on LEDS_CLASS
