@@ -13,6 +13,11 @@ on:
         required: true
         default: true
         type: boolean
+      keep_going:
+        description: 'Diagnostic: make -k, keep building after errors to list every failure (the run still fails)'
+        required: false
+        default: false
+        type: boolean
   push:
     branches:
       - 'main'
@@ -155,12 +160,20 @@ jobs:
         run: |
           NPROC=$(nproc)
           TARGETS="${{ github.event.inputs.build_target || 'Image modules' }}"
-          echo "Building targets: $TARGETS with $NPROC parallel jobs..."
-          
+          KEEP=""
+          [ "${{ github.event.inputs.keep_going }}" = "true" ] && KEEP="-k"
+          echo "Building targets: $TARGETS with $NPROC parallel jobs ${KEEP}..."
+          set -o pipefail
           make -C "$GITHUB_WORKSPACE" O="$GITHUB_WORKSPACE/build/out" \
             ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
             KCFLAGS="-Werror=incompatible-pointer-types" \
-            -j"$NPROC" $TARGETS
+            -j"$NPROC" $KEEP $TARGETS 2>&1 | tee build/build.log
+
+      - name: Error Summary
+        if: failure()
+        run: |
+          echo "== compiler errors"; grep -E ": (fatal )?error:" build/build.log | sort -u || true
+          echo "== failed make targets"; grep -E "\*\*\* \[.*\] Error" build/build.log | sed -E 's/.*\[([^]]+)\].*/\1/' | sort -u || true
 
       - name: Display Ccache Statistics
         run: |
