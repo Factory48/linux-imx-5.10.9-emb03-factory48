@@ -47,6 +47,9 @@ struct deferred_freelist_item {
  * @item: Pointer to deferred_freelist_item field of a structure
  * @free: Function pointer to the free call
  * @nr_pages: number of pages to be freed
+ *
+ * If the helper could not initialize, free is called synchronously with
+ * DF_UNDER_PRESSURE so pages are returned rather than queued without a worker.
  */
 void deferred_free(struct deferred_freelist_item *item,
 		   void (*free)(struct deferred_freelist_item *i,

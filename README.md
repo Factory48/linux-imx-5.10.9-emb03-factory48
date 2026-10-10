@@ -9,6 +9,29 @@ Based on NXP official Android BSP release `android-11.0.0_2.6.0` (commit `f0b392
 
 The GPU kernel driver (`galcore` 6.4.3 build 336687) must be paired with the Vivante user-space libraries from the same 2.6.0 release (`vendor/nxp/fsl-proprietary/gpu-viv`); the 2.0.0 user-space libraries do not match this kernel.
 
+## 2.6.0 repair candidate (not hardware-validated)
+
+The retained 5.10.9 board DT is not compatible with the new audio bindings.
+Before packaging this kernel, run `scripts/emb03-migrate-dtb.py SOURCE.dtb OUTPUT.dtb`
+and embed the same output in **both** `vendor_boot` and `dtbo`, rebuilding their
+AVB descriptors. The tool removes CCM clock 111's assignment, wires SDMA2 to
+`IMX8MP_CLK_AUDIO_AHB_ROOT` for both clocks, and selects the i.MX8MP SAI3/SAI5
+bindings. All other properties, including the input's NPU policy, are preserved.
+The workspace `build-emb03-k5.10.72-ota.py` performs this migration automatically;
+its source baseline remains sleep-p4, **not v12**. Do not reuse its delta on v12.
+
+SDMA rejects missing clocks rather than silently programming the wrong ratio.
+Runtime-PM SDMA controllers handle interrupts in an ONESHOT IRQ thread, check
+resume errors before MMIO, and use IRQ-safe channel locking. GPU DMA-BUF import
+errors release every acquired reference; deferred-free initialization failure
+frees backing pages synchronously. PMIC optional GPIO errors propagate, and the
+NUMA-only speculative-fault interleave guard is corrected without enabling NUMA.
+
+These fixes address reviewed defects, not a proven explanation of the historical
+reboot loop. DT migration has offline behavioral checks; audio capture, IRQ/PM
+behavior and reboot stability still require separately authorized hardware tests.
+Never install the kernel alone with an unmigrated DT or unmatched modules.
+
 ---
 
 ## Key Hardware Features & Integrated Drivers

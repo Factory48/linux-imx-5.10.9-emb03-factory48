@@ -219,21 +219,23 @@ _DmabufAttach(
 
     if (!dmabuf)
     {
-        gcmkONERROR(gcvSTATUS_NOT_SUPPORTED);
+        return gcvSTATUS_NOT_SUPPORTED;
     }
 
     get_dma_buf(dmabuf);
     attachment = dma_buf_attach(dmabuf, &os->device->platform->device->dev);
 
-    if (!attachment)
+    if (IS_ERR(attachment))
     {
+        attachment = NULL;
         gcmkONERROR(gcvSTATUS_NOT_SUPPORTED);
     }
 
     sgt = dma_buf_map_attachment(attachment, DMA_BIDIRECTIONAL);
 
-    if (!sgt)
+    if (IS_ERR(sgt))
     {
+        sgt = NULL;
         gcmkONERROR(gcvSTATUS_NOT_SUPPORTED);
     }
 
@@ -292,6 +294,12 @@ OnError:
     {
         dma_buf_unmap_attachment(attachment, sgt, DMA_BIDIRECTIONAL);
     }
+
+    if (attachment)
+    {
+        dma_buf_detach(dmabuf, attachment);
+    }
+    dma_buf_put(dmabuf);
 
     gcmkFOOTER();
     return status;

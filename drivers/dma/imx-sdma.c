@@ -1035,11 +1035,17 @@ static void mxc_sdma_handle_channel_normal(struct sdma_channel *data)
 static irqreturn_t sdma_int_handler(int irq, void *dev_id)
 {
 	struct sdma_engine *sdma = dev_id;
-	unsigned long stat;
+	unsigned long stat, flags;
+	int ret;
 
-	if (sdma->drvdata->pm_runtime)
-		pm_runtime_get_sync(sdma->dev);
-	else {
+	/* Runtime-PM controllers use a threaded IRQ: genpd may sleep. */
+	if (sdma->drvdata->pm_runtime) {
+		ret = pm_runtime_resume_and_get(sdma->dev);
+		if (ret < 0) {
+			dev_err_ratelimited(sdma->dev, "IRQ runtime resume failed: %d\n", ret);
+			return IRQ_NONE;
+		}
+	} else {
 		clk_enable(sdma->clk_ipg);
 		clk_enable(sdma->clk_ahb);
 	}
@@ -1054,7 +1060,7 @@ static irqreturn_t sdma_int_handler(int irq, void *dev_id)
 		struct sdma_channel *sdmac = &sdma->channel[channel];
 		struct sdma_desc *desc;
 
-		spin_lock(&sdmac->vc.lock);
+		spin_lock_irqsave(&sdmac->vc.lock, flags);
 		desc = sdmac->desc;
 		if (desc) {
 			if (sdmac->flags & IMX_DMA_SG_LOOP) {
@@ -1069,7 +1075,7 @@ static irqreturn_t sdma_int_handler(int irq, void *dev_id)
 			}
 		}
 
-		spin_unlock(&sdmac->vc.lock);
+		spin_unlock_irqrestore(&sdmac->vc.lock, flags);
 		__clear_bit(channel, &stat);
 	}
 
@@ -2467,10 +2473,14 @@ static int sdma_probe(struct platform_device *pdev)
 	sdma->clk_ipg = devm_clk_get(&pdev->dev, "ipg");
 	if (IS_ERR(sdma->clk_ipg))
 		return PTR_ERR(sdma->clk_ipg);
+	if (!sdma->clk_ipg)
+		return dev_err_probe(&pdev->dev, -EINVAL, "missing IPG clock; update the device tree\n");
 
 	sdma->clk_ahb = devm_clk_get(&pdev->dev, "ahb");
 	if (IS_ERR(sdma->clk_ahb))
 		return PTR_ERR(sdma->clk_ahb);
+	if (!sdma->clk_ahb)
+		return dev_err_probe(&pdev->dev, -EINVAL, "missing AHB clock\n");
 
 	ret = clk_prepare(sdma->clk_ipg);
 	if (ret)
@@ -2480,8 +2490,13 @@ static int sdma_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_clk;
 
-	ret = devm_request_irq(&pdev->dev, irq, sdma_int_handler, 0, "sdma",
-			       sdma);
+	if (sdma->drvdata->pm_runtime)
+		ret = devm_request_threaded_irq(&pdev->dev, irq, NULL,
+					       sdma_int_handler, IRQF_ONESHOT,
+					       "sdma", sdma);
+	else
+		ret = devm_request_irq(&pdev->dev, irq, sdma_int_handler, 0,
+				       "sdma", sdma);
 	if (ret)
 		goto err_irq;
 

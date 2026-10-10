@@ -18,8 +18,9 @@
 
 static LIST_HEAD(free_list);
 static size_t list_nr_pages;
-wait_queue_head_t freelist_waitqueue;
-struct task_struct *freelist_task;
+static DECLARE_WAIT_QUEUE_HEAD(freelist_waitqueue);
+static struct task_struct *freelist_task;
+static bool freelist_ready;
 static DEFINE_SPINLOCK(free_list_lock);
 
 void deferred_free(struct deferred_freelist_item *item,
@@ -32,6 +33,12 @@ void deferred_free(struct deferred_freelist_item *item,
 	INIT_LIST_HEAD(&item->list);
 	item->nr_pages = nr_pages;
 	item->free = free;
+
+	/* A failed helper init must not strand the heap's backing pages. */
+	if (!smp_load_acquire(&freelist_ready)) {
+		free(item, DF_UNDER_PRESSURE);
+		return;
+	}
 
 	spin_lock_irqsave(&free_list_lock, flags);
 	list_add(&item->list, &free_list);
@@ -121,18 +128,23 @@ static int deferred_free_thread(void *data)
 
 static int deferred_freelist_init(void)
 {
-	list_nr_pages = 0;
+	int ret;
 
-	init_waitqueue_head(&freelist_waitqueue);
+	ret = register_shrinker(&freelist_shrinker);
+	if (ret)
+		return ret;
+
 	freelist_task = kthread_run(deferred_free_thread, NULL,
 				    "%s", "dmabuf-deferred-free-worker");
 	if (IS_ERR(freelist_task)) {
-		pr_err("Creating thread for deferred free failed\n");
-		return -1;
+		ret = PTR_ERR(freelist_task);
+		unregister_shrinker(&freelist_shrinker);
+		pr_err("Creating thread for deferred free failed: %d\n", ret);
+		return ret;
 	}
 	sched_set_normal(freelist_task, 19);
-
-	return register_shrinker(&freelist_shrinker);
+	smp_store_release(&freelist_ready, true);
+	return 0;
 }
 module_init(deferred_freelist_init);
 MODULE_LICENSE("GPL v2");
