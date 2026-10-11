@@ -91,6 +91,7 @@ jobs:
 
       - name: Compile secilc from upstream source
         id: secilc
+        if: steps.reuse.outputs.policy_success != 'true'
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -131,7 +132,7 @@ jobs:
           arch: x86_64
           profile: pixel_2
           disable-animations: true
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -writable-system
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
           script: python3 packages/release-uuu-builder/tests/runtime/run_emulator.py >out/hardening/logs/runtime.log 2>&1
 
       - name: Record observed stage outcomes and final artifact hashes
