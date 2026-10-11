@@ -1,0 +1,93 @@
+name: PDD privacy hardening and PhoneManager
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_tag:
+        description: Encrypted hardening and PhoneManager sources
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pdd-hardening
+  cancel-in-progress: false
+
+jobs:
+  hardening:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Download encrypted inputs without production private keys
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_TAG: ${{ inputs.bundle_tag }}
+          BUNDLE_PASSWORD: ${{ secrets.BACKGROUND_GOVERNANCE_BUNDLE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pdd-transfer"
+          gh release download "$BUNDLE_TAG" --repo "$GITHUB_REPOSITORY" --pattern governance-sources.zip.enc --dir "$RUNNER_TEMP/pdd-transfer"
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:BUNDLE_PASSWORD -in "$RUNNER_TEMP/pdd-transfer/governance-sources.zip.enc" -out "$RUNNER_TEMP/pdd-transfer/sources.zip"
+          unzip -q "$RUNNER_TEMP/pdd-transfer/sources.zip" -d "$GITHUB_WORKSPACE"
+          rm -rf "$RUNNER_TEMP/pdd-transfer"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - name: Install only compilation and policy prerequisites
+        run: |
+          sdkmanager 'platforms;android-30' 'build-tools;35.0.0'
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends secilc setools
+      - name: Compile exact firmware and migrated manager
+        run: |
+          set -euo pipefail
+          BUILD=packages/release-uuu-builder/patches/background-governance/ci/build.py
+          python3 "$BUILD" helper
+          python3 "$BUILD" app
+          python3 "$BUILD" firmware
+          python3 "$BUILD" probes
+          python3 packages/release-uuu-builder/patches/background-governance/ci/pdd_policy.py
+      - name: Enable disposable runtime
+        run: sudo chmod 666 /dev/kvm
+      - name: One focused UI and foreground network smoke
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: default
+          arch: x86_64
+          profile: pixel_2
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: python3 packages/release-uuu-builder/patches/background-governance/ci/run_pdd_smoke.py
+      - name: Encrypt outputs and focused evidence
+        if: always()
+        env:
+          BUNDLE_PASSWORD: ${{ secrets.BACKGROUND_GOVERNANCE_BUNDLE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile
+          root = Path('out/background-governance')
+          with zipfile.ZipFile('out/pdd-results.zip', 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+              for path in root.rglob('*'):
+                  if path.is_file() and not {'work', 'keys', 'helper', 'app', 'probes'}.intersection(path.relative_to(root).parts):
+                      archive.write(path, path.relative_to(root))
+          PY
+          openssl enc -aes-256-cbc -salt -pbkdf2 -iter 200000 -pass env:BUNDLE_PASSWORD -in out/pdd-results.zip -out out/pdd-results.zip.enc
+          rm -f out/pdd-results.zip
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pdd-hardening-${{ github.run_id }}
+          path: out/pdd-results.zip.enc
+          retention-days: 3
+          if-no-files-found: error
