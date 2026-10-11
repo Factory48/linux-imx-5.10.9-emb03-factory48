@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       reuse_run_id:
-        description: Optional successful compilation artifact run; rerun only policy and runtime gates
+        description: Reuse helper/provider/probes only; rebuild services, libraries, policy and Manager MAC
         required: false
         default: ''
         type: string
@@ -80,18 +80,19 @@ jobs:
         run: python3 "$CI_BUILD" settings >out/hardening/logs/settings.log 2>&1
       - name: Patch and assemble actual firmware services.jar
         id: services
-        if: inputs.reuse_run_id == ''
         continue-on-error: true
         run: python3 "$CI_BUILD" services >out/hardening/logs/services.log 2>&1
       - name: Patch actual firmware ARM32 and ARM64 libselinux
         id: libraries
-        if: inputs.reuse_run_id == ''
         continue-on-error: true
         run: python3 "$CI_BUILD" libraries >out/hardening/logs/libraries.log 2>&1
+      - name: Generate and verify signature-pinned Manager MAC permissions
+        id: manager_mac
+        continue-on-error: true
+        run: python3 "$CI_BUILD" manager_mac >out/hardening/logs/manager-mac.log 2>&1
 
       - name: Compile secilc from upstream source
         id: secilc
-        if: steps.reuse.outputs.policy_success != 'true'
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -143,6 +144,7 @@ jobs:
           SERVICES: ${{ steps.services.outcome }}
           LIBRARIES: ${{ steps.libraries.outcome }}
           SECILC: ${{ steps.secilc.outcome }}
+          MANAGER_MAC: ${{ steps.manager_mac.outcome }}
           POLICY: ${{ steps.policy.outcome }}
           PROBES: ${{ steps.probes.outcome }}
           EMULATOR_APK: ${{ steps.emulator_apk.outcome }}
