@@ -1498,10 +1498,61 @@ out:
 	return rc;
 }
 
+/*
+ * A caller without check_context may only resolve types it can transition to.
+ * Check this before validating the supplied user, role and MLS fields, so an
+ * unrelated type cannot be distinguished from an unknown type via setcon().
+ * The original full-context and transition checks still authorize the change.
+ * The provisional target borrows the source role/range; it owns no storage.
+ */
+static int transition_type_authorized(struct selinux_policy *policy, u32 ssid,
+				      char *context)
+{
+	struct policydb *policydb = &policy->policydb;
+	struct context *source, target;
+	struct type_datum *type;
+	struct av_decision avd;
+	char *name, *end;
+	char saved;
+	u16 tclass;
+
+	source = sidtab_search(policy->sidtab, ssid);
+	if (!source)
+		return -EACCES;
+
+	name = strchr(context, ':');
+	if (!name)
+		return -EACCES;
+	name = strchr(name + 1, ':');
+	if (!name || !name[1])
+		return -EACCES;
+	name++;
+	end = strchr(name, ':');
+	if (!end)
+		end = name + strlen(name);
+	saved = *end;
+	*end = '\0';
+	type = symtab_search(&policydb->p_types, name);
+	*end = saved;
+	if (!type || type->attribute)
+		return -EACCES;
+	if (type->value == source->type)
+		return 0;
+
+	target = *source;
+	target.type = type->value;
+	tclass = unmap_class(&policy->map, SECCLASS_PROCESS);
+	avd_init(policy, &avd);
+	context_struct_compute_av(policydb, source, &target, tclass, &avd, NULL);
+	map_decision(&policy->map, SECCLASS_PROCESS, &avd,
+		     policydb->allow_unknown);
+	return (avd.allowed & PROCESS__DYNTRANSITION) ? 0 : -EACCES;
+}
+
 static int security_context_to_sid_core(struct selinux_state *state,
 					const char *scontext, u32 scontext_len,
 					u32 *sid, u32 def_sid, gfp_t gfp_flags,
-					int force)
+					int force, u32 transition_sid)
 {
 	struct selinux_policy *policy;
 	struct policydb *policydb;
@@ -1546,6 +1597,11 @@ static int security_context_to_sid_core(struct selinux_state *state,
 	policy = rcu_dereference(state->policy);
 	policydb = &policy->policydb;
 	sidtab = policy->sidtab;
+	if (transition_sid) {
+		rc = transition_type_authorized(policy, transition_sid, scontext2);
+		if (rc)
+			goto out_unlock;
+	}
 	rc = string_to_context_struct(policydb, sidtab, scontext2,
 				      &context, def_sid);
 	if (rc == -EINVAL && force) {
@@ -1581,7 +1637,15 @@ int security_context_to_sid(struct selinux_state *state,
 			    gfp_t gfp)
 {
 	return security_context_to_sid_core(state, scontext, scontext_len,
-					    sid, SECSID_NULL, gfp, 0);
+					    sid, SECSID_NULL, gfp, 0, 0);
+}
+
+int security_context_to_sid_for_transition(struct selinux_state *state,
+					 const char *scontext, u32 scontext_len,
+					 u32 *sid, u32 ssid, gfp_t gfp)
+{
+	return security_context_to_sid_core(state, scontext, scontext_len,
+					    sid, SECSID_NULL, gfp, 0, ssid);
 }
 
 int security_context_str_to_sid(struct selinux_state *state,
@@ -1614,7 +1678,7 @@ int security_context_to_sid_default(struct selinux_state *state,
 				    u32 *sid, u32 def_sid, gfp_t gfp_flags)
 {
 	return security_context_to_sid_core(state, scontext, scontext_len,
-					    sid, def_sid, gfp_flags, 1);
+					    sid, def_sid, gfp_flags, 1, 0);
 }
 
 int security_context_to_sid_force(struct selinux_state *state,
@@ -1622,7 +1686,7 @@ int security_context_to_sid_force(struct selinux_state *state,
 				  u32 *sid)
 {
 	return security_context_to_sid_core(state, scontext, scontext_len,
-					    sid, SECSID_NULL, GFP_KERNEL, 1);
+					    sid, SECSID_NULL, GFP_KERNEL, 1, 0);
 }
 
 static int compute_sid_handle_invalid_context(

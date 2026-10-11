@@ -317,6 +317,10 @@ int security_context_to_sid(struct selinux_state *state,
 			    const char *scontext, u32 scontext_len,
 			    u32 *out_sid, gfp_t gfp);
 
+int security_context_to_sid_for_transition(struct selinux_state *state,
+					 const char *scontext, u32 scontext_len,
+					 u32 *out_sid, u32 ssid, gfp_t gfp);
+
 int security_context_str_to_sid(struct selinux_state *state,
 				const char *scontext, u32 *out_sid, gfp_t gfp);
 
