@@ -1,0 +1,52 @@
+name: App background governance compile-only
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_tag:
+        description: Encrypted governance sources
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Download encrypted inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_TAG: ${{ inputs.bundle_tag }}
+          BUNDLE_PASSWORD: ${{ secrets.BACKGROUND_GOVERNANCE_BUNDLE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/governance-transfer"
+          gh release download "$BUNDLE_TAG" --repo "$GITHUB_REPOSITORY" --pattern governance-sources.zip.enc --dir "$RUNNER_TEMP/governance-transfer"
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:BUNDLE_PASSWORD \
+            -in "$RUNNER_TEMP/governance-transfer/governance-sources.zip.enc" -out "$RUNNER_TEMP/governance-transfer/sources.zip"
+          unzip -q "$RUNNER_TEMP/governance-transfer/sources.zip" -d "$GITHUB_WORKSPACE"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - name: Install API30 build prerequisites
+        run: sdkmanager 'platforms;android-30' 'build-tools;35.0.0'
+      - name: Compile only the changed framework DEX
+        run: |
+          set -euo pipefail
+          BUILD=packages/release-uuu-builder/patches/background-governance/ci/build.py
+          python3 "$BUILD" helper
+          python3 "$BUILD" firmware
+      - uses: actions/upload-artifact@v4
+        with:
+          name: background-governance-compile-${{ github.run_id }}
+          path: out/background-governance/services.jar
+          retention-days: 3
+          if-no-files-found: error
