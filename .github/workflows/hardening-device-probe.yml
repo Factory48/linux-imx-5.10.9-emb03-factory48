@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       bundle_tag:
-        description: Encrypted probe sources with explicit trusted TCP baseline extras
+        description: Encrypted probe sources with real local WebView renderer acceptance
         required: true
         type: string
 
