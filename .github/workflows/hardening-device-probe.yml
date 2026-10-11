@@ -33,6 +33,10 @@ jobs:
             -in "$RUNNER_TEMP/device-probe-transfer/device-probe-sources.zip.enc" -out "$RUNNER_TEMP/device-probe-transfer/sources.zip"
           unzip -q "$RUNNER_TEMP/device-probe-transfer/sources.zip" -d "$GITHUB_WORKSPACE"
           rm -rf "$RUNNER_TEMP/device-probe-transfer"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
       - name: Install only API30 SDK and APK build tools
         run: sdkmanager 'platforms;android-30' 'build-tools;35.0.0'
       - name: Compile production classes and sign ordinary APK with ephemeral CI key
