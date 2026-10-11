@@ -78,11 +78,11 @@ jobs:
         if: steps.helper.outcome == 'success'
         continue-on-error: true
         run: python3 "$CI_BUILD" settings >out/hardening/logs/settings.log 2>&1
-      - name: Patch and assemble actual firmware services.jar
+      - name: Patch services.jar and require freshly assembled DEX outputs
         id: services
         continue-on-error: true
         run: python3 "$CI_BUILD" services >out/hardening/logs/services.log 2>&1
-      - name: Patch actual firmware ARM32 and ARM64 libselinux
+      - name: Patch ARM libselinux and compile/load host x86_64 libfec2
         id: libraries
         continue-on-error: true
         run: python3 "$CI_BUILD" libraries >out/hardening/logs/libraries.log 2>&1
@@ -122,7 +122,7 @@ jobs:
         if: steps.reuse.outcome == 'success' || (steps.probes.outcome == 'success' && steps.emulator_apk.outcome == 'success')
         run: |
           sudo chmod 666 /dev/kvm
-      - name: Run Android11 actual-provider Binder smoke
+      - name: Run real Android11 Binder probes with adbd-independent zero-phase evidence
         id: runtime
         if: steps.reuse.outcome == 'success' || (steps.probes.outcome == 'success' && steps.emulator_apk.outcome == 'success')
         continue-on-error: true
