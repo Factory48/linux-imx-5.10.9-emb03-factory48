@@ -7,9 +7,15 @@ on:
         description: Encrypted temporary release asset tag (hardening-bundle.zip.enc)
         required: true
         type: string
+      reuse_run_id:
+        description: Optional successful compilation artifact run; rerun only policy and runtime gates
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: firmware-hardening-${{ github.ref }}
@@ -21,6 +27,7 @@ jobs:
     timeout-minutes: 50
     env:
       CI_BUILD: packages/release-uuu-builder/patches/hardening/ci/build.py
+      REUSE_RUN_ID: ${{ inputs.reuse_run_id }}
     steps:
       - name: Download encrypted private inputs
         env:
@@ -36,6 +43,15 @@ jobs:
           unzip -q "$RUNNER_TEMP/hardening-transfer/bundle.zip" -d "$GITHUB_WORKSPACE"
           rm -rf "$RUNNER_TEMP/hardening-transfer"
           mkdir -p out/hardening/logs
+
+      - name: Reuse observed successful compilation artifacts
+        id: reuse
+        if: inputs.reuse_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "$REUSE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "firmware-hardening-$REUSE_RUN_ID" --dir out/hardening
+          python3 packages/release-uuu-builder/patches/hardening/ci/reuse.py
 
       - uses: actions/setup-java@v4
         with:
@@ -54,6 +70,7 @@ jobs:
 
       - name: Compile Java runtime helper (declarations excluded)
         id: helper
+        if: inputs.reuse_run_id == ''
         continue-on-error: true
         run: python3 "$CI_BUILD" helper >out/hardening/logs/helper.log 2>&1
       - name: Patch and assemble actual firmware SettingsProvider
@@ -63,10 +80,12 @@ jobs:
         run: python3 "$CI_BUILD" settings >out/hardening/logs/settings.log 2>&1
       - name: Patch and assemble actual firmware services.jar
         id: services
+        if: inputs.reuse_run_id == ''
         continue-on-error: true
         run: python3 "$CI_BUILD" services >out/hardening/logs/services.log 2>&1
       - name: Patch actual firmware ARM32 and ARM64 libselinux
         id: libraries
+        if: inputs.reuse_run_id == ''
         continue-on-error: true
         run: python3 "$CI_BUILD" libraries >out/hardening/logs/libraries.log 2>&1
 
@@ -76,7 +95,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p work
-          git clone --depth 1 --branch 3.2 https://github.com/SELinuxProject/selinux.git work/selinux >out/hardening/logs/secilc.log 2>&1
+          git clone --depth 1 --branch 3.9 https://github.com/SELinuxProject/selinux.git work/selinux >out/hardening/logs/secilc.log 2>&1
           make -C work/selinux/libsepol -j2 >>out/hardening/logs/secilc.log 2>&1
           make -C work/selinux/secilc secilc \
             CFLAGS="-O2 -I$GITHUB_WORKSPACE/work/selinux/libsepol/include" \
@@ -89,6 +108,7 @@ jobs:
 
       - name: Compile ordinary, platform-signed and preinstalled Android probes
         id: probes
+        if: inputs.reuse_run_id == ''
         continue-on-error: true
         run: python3 "$CI_BUILD" probes >out/hardening/logs/probes.log 2>&1
       - name: Sign firmware provider with public AOSP emulator-only test key
@@ -97,12 +117,12 @@ jobs:
         continue-on-error: true
         run: python3 "$CI_BUILD" emulator_apk >out/hardening/logs/emulator-signing.log 2>&1
       - name: Enable KVM for disposable emulator
-        if: steps.probes.outcome == 'success' && steps.emulator_apk.outcome == 'success'
+        if: steps.reuse.outcome == 'success' || (steps.probes.outcome == 'success' && steps.emulator_apk.outcome == 'success')
         run: |
           sudo chmod 666 /dev/kvm
       - name: Run Android11 actual-provider Binder smoke
         id: runtime
-        if: steps.probes.outcome == 'success' && steps.emulator_apk.outcome == 'success'
+        if: steps.reuse.outcome == 'success' || (steps.probes.outcome == 'success' && steps.emulator_apk.outcome == 'success')
         continue-on-error: true
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -139,19 +159,4 @@ jobs:
           if-no-files-found: error
       - name: Require every build and runtime gate
         if: always()
-        env:
-          HELPER: ${{ steps.helper.outcome }}
-          SETTINGS: ${{ steps.settings.outcome }}
-          SERVICES: ${{ steps.services.outcome }}
-          LIBRARIES: ${{ steps.libraries.outcome }}
-          SECILC: ${{ steps.secilc.outcome }}
-          POLICY: ${{ steps.policy.outcome }}
-          PROBES: ${{ steps.probes.outcome }}
-          EMULATOR_APK: ${{ steps.emulator_apk.outcome }}
-          RUNTIME: ${{ steps.runtime.outcome }}
-        run: |
-          for stage in HELPER SETTINGS SERVICES LIBRARIES SECILC POLICY PROBES EMULATOR_APK RUNTIME; do
-            echo "$stage=${!stage}"
-            test "${!stage}" = success || failed=true
-          done
-          test "${failed:-false}" = false
+        run: python3 packages/release-uuu-builder/patches/hardening/ci/report.py --require-success
