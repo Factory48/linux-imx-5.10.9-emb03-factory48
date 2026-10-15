@@ -1,0 +1,52 @@
+name: Physical Android hardening probe APKs
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_tag:
+        description: Encrypted probe sources with real local WebView renderer acceptance
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hardening-device-probe
+  cancel-in-progress: false
+
+jobs:
+  compile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Decrypt only owned probe sources
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_TAG: ${{ inputs.bundle_tag }}
+          BUNDLE_PASSWORD: ${{ secrets.DEVICE_PROBE_BUNDLE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$BUNDLE_PASSWORD"
+          gh release download "$BUNDLE_TAG" --repo "$GITHUB_REPOSITORY" --pattern device-probe-sources.zip.enc --dir "$RUNNER_TEMP/device-probe-transfer"
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:BUNDLE_PASSWORD \
+            -in "$RUNNER_TEMP/device-probe-transfer/device-probe-sources.zip.enc" -out "$RUNNER_TEMP/device-probe-transfer/sources.zip"
+          unzip -q "$RUNNER_TEMP/device-probe-transfer/sources.zip" -d "$GITHUB_WORKSPACE"
+          rm -rf "$RUNNER_TEMP/device-probe-transfer"
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - name: Install only API30 SDK and APK build tools
+        run: sdkmanager 'platforms;android-30' 'build-tools;35.0.0'
+      - name: Compile production classes and sign ordinary APK with ephemeral CI key
+        env:
+          BUNDLE_PASSWORD: ${{ secrets.DEVICE_PROBE_BUNDLE_PASSWORD }}
+        run: python3 packages/release-uuu-builder/patches/hardening/device-smoke/build.py
+      - name: Upload encrypted probe APKs and compile receipt only
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardening-device-probe-${{ github.run_id }}
+          path: out/device-probe/device-probe.zip.enc
+          retention-days: 3
+          if-no-files-found: error

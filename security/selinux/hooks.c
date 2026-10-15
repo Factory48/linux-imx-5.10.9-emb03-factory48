@@ -6403,7 +6403,7 @@ static int selinux_setprocattr(const char *name, void *value, size_t size)
 {
 	struct task_security_struct *tsec;
 	struct cred *new;
-	u32 mysid = current_sid(), sid = 0, ptsid;
+	u32 mysid = current_sid(), sid = 0, ptsid, transition_sid = 0;
 	int error;
 	char *str = value;
 
@@ -6435,13 +6435,29 @@ static int selinux_setprocattr(const char *name, void *value, size_t size)
 	if (error)
 		return error;
 
+	if (!strcmp(name, "current")) {
+		struct av_decision avd;
+
+		error = avc_has_perm_noaudit(&selinux_state, mysid,
+					   SECINITSID_SECURITY, SECCLASS_SECURITY,
+					   SECURITY__CHECK_CONTEXT, 0, &avd);
+		if (error == -EACCES)
+			transition_sid = mysid;
+		else if (error)
+			return error;
+	}
+
 	/* Obtain a SID for the context, if one was specified. */
 	if (size && str[0] && str[0] != '\n') {
 		if (str[size-1] == '\n') {
 			str[size-1] = 0;
 			size--;
 		}
-		error = security_context_to_sid(&selinux_state, value, size,
+		if (transition_sid)
+			error = security_context_to_sid_for_transition(&selinux_state,
+					value, size, &sid, transition_sid, GFP_KERNEL);
+		else
+			error = security_context_to_sid(&selinux_state, value, size,
 						&sid, GFP_KERNEL);
 		if (error == -EINVAL && !strcmp(name, "fscreate")) {
 			if (!has_cap_mac_admin(true)) {

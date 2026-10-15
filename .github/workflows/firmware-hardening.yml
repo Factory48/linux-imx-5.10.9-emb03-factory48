@@ -1,0 +1,165 @@
+name: Firmware userland hardening
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_tag:
+        description: Encrypted temporary release asset tag (hardening-bundle.zip.enc)
+        required: true
+        type: string
+      reuse_run_id:
+        description: Reuse helper/provider/probes only; rebuild services, libraries, policy and Manager MAC
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: firmware-hardening-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  userland:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 50
+    env:
+      CI_BUILD: packages/release-uuu-builder/patches/hardening/ci/build.py
+      REUSE_RUN_ID: ${{ inputs.reuse_run_id }}
+    steps:
+      - name: Download encrypted private inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_TAG: ${{ inputs.bundle_tag }}
+          BUNDLE_PASSWORD: ${{ secrets.HARDENING_BUNDLE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$BUNDLE_PASSWORD"
+          gh release download "$BUNDLE_TAG" --repo "$GITHUB_REPOSITORY" --pattern hardening-bundle.zip.enc --dir "$RUNNER_TEMP/hardening-transfer"
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:BUNDLE_PASSWORD \
+            -in "$RUNNER_TEMP/hardening-transfer/hardening-bundle.zip.enc" -out "$RUNNER_TEMP/hardening-transfer/bundle.zip"
+          unzip -q "$RUNNER_TEMP/hardening-transfer/bundle.zip" -d "$GITHUB_WORKSPACE"
+          rm -rf "$RUNNER_TEMP/hardening-transfer"
+          mkdir -p out/hardening/logs
+
+      - name: Reuse observed successful compilation artifacts
+        id: reuse
+        if: inputs.reuse_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "$REUSE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "firmware-hardening-$REUSE_RUN_ID" --dir out/hardening
+          python3 packages/release-uuu-builder/patches/hardening/ci/reuse.py
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - name: Install API30 build tools and host dependencies
+        run: |
+          sdkmanager 'platforms;android-30' 'build-tools;30.0.3'
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flex bison libpcre2-dev libsepol-dev
+          python3 -m pip install pyelftools
+
+      - name: Compile Java runtime helper (declarations excluded)
+        id: helper
+        if: inputs.reuse_run_id == ''
+        continue-on-error: true
+        run: python3 "$CI_BUILD" helper >out/hardening/logs/helper.log 2>&1
+      - name: Patch and assemble actual firmware SettingsProvider
+        id: settings
+        if: steps.helper.outcome == 'success'
+        continue-on-error: true
+        run: python3 "$CI_BUILD" settings >out/hardening/logs/settings.log 2>&1
+      - name: Patch services.jar and require freshly assembled DEX outputs
+        id: services
+        continue-on-error: true
+        run: python3 "$CI_BUILD" services >out/hardening/logs/services.log 2>&1
+      - name: Patch ARM libselinux and compile/load host x86_64 libfec2
+        id: libraries
+        continue-on-error: true
+        run: python3 "$CI_BUILD" libraries >out/hardening/logs/libraries.log 2>&1
+      - name: Generate and verify signature-pinned Manager MAC permissions
+        id: manager_mac
+        continue-on-error: true
+        run: python3 "$CI_BUILD" manager_mac >out/hardening/logs/manager-mac.log 2>&1
+
+      - name: Compile secilc from upstream source
+        id: secilc
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          git clone --depth 1 --branch 3.9 https://github.com/SELinuxProject/selinux.git work/selinux >out/hardening/logs/secilc.log 2>&1
+          make -C work/selinux/libsepol -j2 >>out/hardening/logs/secilc.log 2>&1
+          make -C work/selinux/secilc secilc \
+            CFLAGS="-O2 -I$GITHUB_WORKSPACE/work/selinux/libsepol/include" \
+            LDLIBS="$GITHUB_WORKSPACE/work/selinux/libsepol/src/libsepol.a" >>out/hardening/logs/secilc.log 2>&1
+      - name: Generate contexts and combine all actual CIL with neverallow checks
+        id: policy
+        if: steps.secilc.outcome == 'success'
+        continue-on-error: true
+        run: python3 "$CI_BUILD" policy >out/hardening/logs/policy.log 2>&1
+
+      - name: Compile ordinary, platform-signed and preinstalled Android probes
+        id: probes
+        if: inputs.reuse_run_id == ''
+        continue-on-error: true
+        run: python3 "$CI_BUILD" probes >out/hardening/logs/probes.log 2>&1
+      - name: Sign firmware provider with public AOSP emulator-only test key
+        id: emulator_apk
+        if: steps.settings.outcome == 'success'
+        continue-on-error: true
+        run: python3 "$CI_BUILD" emulator_apk >out/hardening/logs/emulator-signing.log 2>&1
+      - name: Enable KVM for disposable emulator
+        if: steps.reuse.outcome == 'success' || (steps.probes.outcome == 'success' && steps.emulator_apk.outcome == 'success')
+        run: |
+          sudo chmod 666 /dev/kvm
+      - name: Run real Android11 Binder probes with adbd-independent zero-phase evidence
+        id: runtime
+        if: steps.reuse.outcome == 'success' || (steps.probes.outcome == 'success' && steps.emulator_apk.outcome == 'success')
+        continue-on-error: true
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: default
+          arch: x86_64
+          profile: pixel_2
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: python3 packages/release-uuu-builder/tests/runtime/run_emulator.py >out/hardening/logs/runtime.log 2>&1
+
+      - name: Record observed stage outcomes and final artifact hashes
+        if: always()
+        env:
+          HELPER: ${{ steps.helper.outcome }}
+          SETTINGS: ${{ steps.settings.outcome }}
+          SERVICES: ${{ steps.services.outcome }}
+          LIBRARIES: ${{ steps.libraries.outcome }}
+          SECILC: ${{ steps.secilc.outcome }}
+          MANAGER_MAC: ${{ steps.manager_mac.outcome }}
+          POLICY: ${{ steps.policy.outcome }}
+          PROBES: ${{ steps.probes.outcome }}
+          EMULATOR_APK: ${{ steps.emulator_apk.outcome }}
+          RUNTIME: ${{ steps.runtime.outcome }}
+        run: |
+          mkdir -p out/hardening
+          python3 packages/release-uuu-builder/patches/hardening/ci/report.py
+      - name: Upload unsigned firmware outputs and restricted diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-hardening-${{ github.run_id }}
+          path: out/hardening/
+          retention-days: 3
+          if-no-files-found: error
+      - name: Require every build and runtime gate
+        if: always()
+        run: python3 packages/release-uuu-builder/patches/hardening/ci/report.py --require-success

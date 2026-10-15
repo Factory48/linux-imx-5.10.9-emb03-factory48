@@ -3760,7 +3760,7 @@ _FuncInit_MMU(IN gcsFUNCTION_EXECUTION_PTR Execution)
     mode = gcvMMU_MODE_4K;
 #endif
 
-    flags |= gcvALLOC_FLAG_4GB_ADDR;
+    flags |= gcvALLOC_FLAG_4GB_ADDR | gcvALLOC_FLAG_4K_PAGES;
 
 #if gcdENABLE_CACHEABLE_COMMAND_BUFFER
     flags |= gcvALLOC_FLAG_CACHEABLE;
@@ -3898,7 +3898,7 @@ _FuncExecute_MMU(IN gcsFUNCTION_EXECUTION_PTR Execution)
     gceSTATUS status = gcvSTATUS_OK;
     gctUINT32 address = 0;
     gctUINT32 idle;
-    gctUINT32 timer = 0, delay = 1;
+    gctUINT32 timer = 0, delay = 10;
     gckHARDWARE hardware = (gckHARDWARE)Execution->hardware;
     gckMMU mmu = hardware->kernel->mmu;
 
@@ -4055,8 +4055,7 @@ _FuncExecute_MMU(IN gcsFUNCTION_EXECUTION_PTR Execution)
     /* Wait until MMU configure finishes. */
     do
     {
-        /* timer and kernel->timeOut are expressed in milliseconds. */
-        gckOS_Delay(hardware->os, delay);
+        gckOS_Udelay(hardware->os, delay);
 
         gcmkONERROR(gckOS_ReadRegisterEx(
             hardware->os,

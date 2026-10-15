@@ -1,0 +1,58 @@
+name: Exact Image SELinux kernel smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_tag:
+        description: Temporary encrypted kernel-smoke source release tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: kernel-hardening-smoke
+  cancel-in-progress: false
+
+jobs:
+  qemu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      SMOKE: packages/release-uuu-builder/patches/hardening/kernel-smoke/ci.py
+    steps:
+      - name: Download only encrypted owned smoke sources
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_TAG: ${{ inputs.bundle_tag }}
+          BUNDLE_PASSWORD: ${{ secrets.KERNEL_SMOKE_BUNDLE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$BUNDLE_PASSWORD"
+          mkdir -p out/kernel-smoke
+          gh release download "$BUNDLE_TAG" --repo "$GITHUB_REPOSITORY" --pattern kernel-smoke.zip.enc --dir "$RUNNER_TEMP/kernel-smoke-transfer"
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:BUNDLE_PASSWORD \
+            -in "$RUNNER_TEMP/kernel-smoke-transfer/kernel-smoke.zip.enc" -out "$RUNNER_TEMP/kernel-smoke-transfer/sources.zip"
+          unzip -q "$RUNNER_TEMP/kernel-smoke-transfer/sources.zip" -d "$GITHUB_WORKSPACE"
+          rm -rf "$RUNNER_TEMP/kernel-smoke-transfer"
+      - name: Install native ARM64 static build and QEMU policy tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-arm qemu-user gcc-aarch64-linux-gnu libc6-dev-arm64-cross secilc file
+      - name: Download exact completed kernel artifact and boot native smoke
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 "$SMOKE" run
+      - name: Record actual cases and final hashes and require success
+        if: always()
+        run: python3 "$SMOKE" report
+      - name: Upload console and provenance only, never Image or firmware
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-hardening-smoke-${{ github.run_id }}
+          path: out/kernel-smoke/
+          retention-days: 3
+          if-no-files-found: error

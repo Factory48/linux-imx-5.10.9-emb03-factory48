@@ -1,0 +1,94 @@
+name: App background governance
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_tag:
+        description: Encrypted ordinary-app governance inputs
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: background-governance
+  cancel-in-progress: false
+
+jobs:
+  governance:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Download encrypted firmware and policy inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE_TAG: ${{ inputs.bundle_tag }}
+          BUNDLE_PASSWORD: ${{ secrets.BACKGROUND_GOVERNANCE_BUNDLE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/governance-transfer"
+          gh release download "$BUNDLE_TAG" --repo "$GITHUB_REPOSITORY" --pattern governance-sources.zip.enc --dir "$RUNNER_TEMP/governance-transfer"
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:BUNDLE_PASSWORD \
+            -in "$RUNNER_TEMP/governance-transfer/governance-sources.zip.enc" -out "$RUNNER_TEMP/governance-transfer/sources.zip"
+          unzip -q "$RUNNER_TEMP/governance-transfer/sources.zip" -d "$GITHUB_WORKSPACE"
+          rm -rf "$RUNNER_TEMP/governance-transfer"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - name: Install only API30 compilation prerequisites
+        run: sdkmanager 'platforms;android-30' 'build-tools;35.0.0'
+      - name: Compile policy and DeviceSettings and assemble exact firmware
+        run: |
+          set -euo pipefail
+          BUILD=packages/release-uuu-builder/patches/background-governance/ci/build.py
+          python3 "$BUILD" helper
+          python3 "$BUILD" app
+          python3 "$BUILD" firmware
+          python3 "$BUILD" probes
+      - name: Enable KVM for one disposable Android11 main-path smoke
+        run: sudo chmod 666 /dev/kvm
+      - name: Install defaults, foreground, background and upgrade main path
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: default
+          arch: x86_64
+          profile: pixel_2
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: python3 packages/release-uuu-builder/patches/background-governance/ci/run_emulator.py
+      - name: Encrypt firmware outputs and main-path evidence
+        if: always()
+        env:
+          BUNDLE_PASSWORD: ${{ secrets.BACKGROUND_GOVERNANCE_BUNDLE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile
+          root = Path('out/background-governance')
+          with zipfile.ZipFile('out/governance-results.zip', 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+              for path in root.rglob('*'):
+                  if path.is_file() and 'work' not in path.parts and 'keys' not in path.parts and 'helper' not in path.parts and 'app' not in path.parts and 'probes' not in path.parts:
+                      archive.write(path, path.relative_to(root))
+              for name in ('consumer-v1.apk', 'consumer-v2.apk', 'control-unsigned.apk'):
+                  path = root / 'probes' / name
+                  if path.is_file(): archive.write(path, 'probes/' + name)
+          PY
+          openssl enc -aes-256-cbc -salt -pbkdf2 -iter 200000 -pass env:BUNDLE_PASSWORD \
+            -in out/governance-results.zip -out out/governance-results.zip.enc
+          rm -f out/governance-results.zip
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: background-governance-${{ github.run_id }}
+          path: out/governance-results.zip.enc
+          retention-days: 3
+          if-no-files-found: error
