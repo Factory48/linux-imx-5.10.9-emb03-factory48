@@ -21,7 +21,6 @@ on:
   push:
     branches:
       - 'main'
-      - 'emb03-5.10.72'
     tags:
       - 'v*'
 
