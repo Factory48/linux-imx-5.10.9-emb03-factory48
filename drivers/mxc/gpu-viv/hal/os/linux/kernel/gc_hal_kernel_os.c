@@ -4103,11 +4103,20 @@ gckOS_WriteMemory(
     /* Verify the arguments. */
     gcmkVERIFY_ARGUMENT(Address != gcvNULL);
 
-    /* Write memory. */
+    /* Write memory.
+     * Check for a kernel address first: built in (=y), galcore initializes in
+     * PID 1 with addr_limit == KERNEL_DS, where access_ok() also accepts kernel
+     * addresses, and put_user() (STTR on CPUs without UAO) faults on them.
+     */
+    if (virt_addr_valid(Address) || is_vmalloc_addr(Address))
+    {
+        /* Kernel address. */
+        *(gctUINT32 *)Address = Data;
+    }
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)
-    if (access_ok(Address, 4))
+    else if (access_ok(Address, 4))
 #else
-    if (access_ok(VERIFY_WRITE, Address, 4))
+    else if (access_ok(VERIFY_WRITE, Address, 4))
 #endif
     {
         /* User address. */
@@ -4115,11 +4124,6 @@ gckOS_WriteMemory(
         {
             gcmkONERROR(gcvSTATUS_INVALID_ADDRESS);
         }
-    }
-    else if (virt_addr_valid(Address) || is_vmalloc_addr(Address))
-    {
-        /* Kernel address. */
-        *(gctUINT32 *)Address = Data;
     }
     else
     {
@@ -4144,11 +4148,16 @@ gckOS_ReadMappedPointer(
     /* Verify the arguments. */
     gcmkVERIFY_ARGUMENT(Address != gcvNULL);
 
-    /* Write memory. */
+    /* Read memory. Kernel address first, see gckOS_WriteMemory. */
+    if (virt_addr_valid(Address) || is_vmalloc_addr(Address))
+    {
+        /* Kernel address. */
+        *Data = *(gctUINT32_PTR)Address;
+    }
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)
-    if (access_ok(Address, 4))
+    else if (access_ok(Address, 4))
 #else
-    if (access_ok(VERIFY_READ, Address, 4))
+    else if (access_ok(VERIFY_READ, Address, 4))
 #endif
     {
         /* User address. */
