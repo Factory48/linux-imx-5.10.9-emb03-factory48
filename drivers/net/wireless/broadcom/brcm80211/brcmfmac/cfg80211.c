@@ -3749,13 +3749,8 @@ static void brcmf_report_wowl_wakeind(struct wiphy *wiphy, struct brcmf_if *ifp)
 
 	wakeind = le32_to_cpu(wake_ind_le.ucode_wakeind);
 	brcmf_info("wowl wakeind=0x%08x\n", wakeind);
-	if (wakeind & BRCMF_WOWL_NET) {
+	if (wakeind & BRCMF_WOWL_NET)
 		cfg->wowl.wake_count++;
-		/* A new connection to adb or data on an established one woke the host: hold the system up once so
-		 * the exchange can finish before SystemSuspend suspends it again.
-		 */
-		brcmf_bus_wake_hold(drvr->bus_if);
-	}
 	if (wakeind & (BRCMF_WOWL_MAGIC | BRCMF_WOWL_DIS | BRCMF_WOWL_BCN |
 		       BRCMF_WOWL_RETR | BRCMF_WOWL_NET |
 		       BRCMF_WOWL_PFN_FOUND)) {

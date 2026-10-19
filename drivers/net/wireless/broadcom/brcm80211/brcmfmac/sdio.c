@@ -39,14 +39,13 @@
 #define DCMD_RESP_TIMEOUT	msecs_to_jiffies(2500)
 #define CTL_DONE_TIMEOUT	msecs_to_jiffies(2500)
 
-/* After the dongle wakes the host because of a network pattern (data for an established connection, or a new
- * connection to adb) the system must not suspend again for this long, so the connection set-up that started it
- * can finish. Without it Android's SystemSuspend (100 ms poll) suspends the board again ~0.1 s after the wake-up,
- * in the middle of the adb handshake; the packets that follow are pure ACKs, which by design do not wake it, so the
- * session stalls until the power key is pressed. The value covers the ~2 s an adb session needs to come up
- * (measured on the wire); it is NOT taken from another driver. 0 disables it.
+/* After the dongle interrupts the host, or a batch of frames was handed to the network stack, the system must not
+ * suspend for this long, so the stack and user space can react to what woke it. Without it Android's SystemSuspend
+ * (100 ms poll, then a blocking read of /sys/power/wakeup_count, which waits for active wakeup sources) puts the
+ * board back to sleep ~0.1 s after every wake-up. 500 ms is Broadcom's own value for its Android driver
+ * (bcmdhd DHD_PACKET_TIMEOUT_MS, applied per received packet and event). 0 disables it.
  */
-#define BRCMF_SDIO_WAKE_HOLD_MS	3000
+#define BRCMF_SDIO_WAKE_HOLD_MS	500
 static unsigned int brcmf_sdio_wake_hold_ms = BRCMF_SDIO_WAKE_HOLD_MS;
 module_param_named(wake_hold_ms, brcmf_sdio_wake_hold_ms, uint, 0644);
 MODULE_PARM_DESC(wake_hold_ms, "Keep the system awake this many ms after an interrupt or received frames [SDIO], 0 = off");
@@ -1858,18 +1857,12 @@ static void brcmf_sdio_pad(struct brcmf_sdio *bus, u16 *pad, u16 *rdlen)
 	}
 }
 
-/* Called from the WoWLAN resume path, once, when the dongle says a network pattern (data segment or new adb
- * connection) woke the host. Not called for every interrupt or received frame: an associated station gets
- * those all the time (beacons, ARP, broadcast), and holding for each of them keeps the board from ever suspending.
- */
-void brcmf_sdio_wake_hold(struct device *dev)
+static void brcmf_sdio_wake_hold(struct brcmf_sdio *bus)
 {
-	struct brcmf_bus *bus_if = dev_get_drvdata(dev);
-	struct brcmf_sdio_dev *sdiodev = bus_if->bus_priv.sdio;
 	unsigned int msec = READ_ONCE(brcmf_sdio_wake_hold_ms);
 
 	if (msec)
-		pm_wakeup_ws_event(sdiodev->rx_ws, msec, false);
+		pm_wakeup_ws_event(bus->sdiodev->rx_ws, msec, false);
 }
 
 static uint brcmf_sdio_readframes(struct brcmf_sdio *bus, uint maxframes)
@@ -2079,6 +2072,8 @@ static uint brcmf_sdio_readframes(struct brcmf_sdio *bus, uint maxframes)
 	}
 
 	rxcount = maxframes - rxleft;
+	if (rxcount)
+		brcmf_sdio_wake_hold(bus);
 	/* Message if we hit the limit */
 	if (!rxleft)
 		brcmf_dbg(DATA, "hit rx limit of %d frames\n", maxframes);
@@ -3667,6 +3662,7 @@ void brcmf_sdio_isr(struct brcmf_sdio *bus, bool in_isr)
 
 	/* Count the interrupt call */
 	bus->sdcnt.intrcount++;
+	brcmf_sdio_wake_hold(bus);
 	if (in_isr)
 		atomic_set(&bus->ipend, 1);
 	else
@@ -4201,7 +4197,6 @@ static const struct brcmf_bus_ops brcmf_sdio_bus_ops = {
 	.rxctl = brcmf_sdio_bus_rxctl,
 	.gettxq = brcmf_sdio_bus_gettxq,
 	.wowl_config = brcmf_sdio_wowl_config,
-	.wake_hold = brcmf_sdio_wake_hold,
 	.get_ramsize = brcmf_sdio_bus_get_ramsize,
 	.get_memdump = brcmf_sdio_bus_get_memdump,
 	.get_fwname = brcmf_sdio_get_fwname,
