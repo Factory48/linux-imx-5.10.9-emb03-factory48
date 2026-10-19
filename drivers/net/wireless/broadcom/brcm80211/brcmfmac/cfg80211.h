@@ -341,6 +341,7 @@ struct brcmf_cfg80211_wowl {
  * @vif_cnt: number of vif instances.
  * @vif_event: vif event signalling.
  * @wowl: wowl related information.
+ * @wake_input: input device that reports KEY_WAKEUP when a network pattern woke the host.
  * @pno: information of pno module.
  */
 struct brcmf_cfg80211_info {
@@ -373,6 +374,7 @@ struct brcmf_cfg80211_info {
 	struct brcmu_d11inf d11inf;
 	struct brcmf_assoclist_le assoclist;
 	struct brcmf_cfg80211_wowl wowl;
+	struct input_dev *wake_input;
 	struct brcmf_pno_info *pno;
 	u8 ac_priority[MAX_8021D_PRIO];
 };

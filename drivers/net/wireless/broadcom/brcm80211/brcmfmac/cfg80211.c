@@ -10,6 +10,7 @@
 #include <linux/seq_file.h>
 #include <linux/etherdevice.h>
 #include <linux/module.h>
+#include <linux/input.h>
 #include <linux/vmalloc.h>
 #include <net/cfg80211.h>
 #include <net/netlink.h>
@@ -3729,6 +3730,50 @@ brcmf_wowl_nd_results(struct brcmf_if *ifp, const struct brcmf_event_msg *e,
 
 #ifdef CONFIG_PM
 
+/* A network pattern (data on an adb connection, a new adb connection) woke the host. Android only treats the board
+ * as "in use" when something goes through its wake path: the power key does (PhoneWindowManager wakeUp(), then the
+ * display suspend blocker and the screen-off timeout keep it up), a Wi-Fi interrupt alone does not, so SystemSuspend
+ * suspends it again ~0.1 s later, in the middle of the adb/scrcpy handshake (measured: scrcpy 1/6, adb connect
+ * "offline"). Report the same thing the key would: KEY_WAKEUP, which PhoneWindowManager wakes the device for.
+ * The panel stays dark (the settings app keeps it off), the screen-off timeout then decides when it sleeps again.
+ */
+static void brcmf_wowl_wake_input_register(struct brcmf_cfg80211_info *cfg)
+{
+	struct input_dev *in = input_allocate_device();
+
+	if (!in)
+		return;
+	in->name = "brcmfmac-wake";
+	in->phys = "brcmfmac/wowl";
+	in->id.bustype = BUS_HOST;
+	input_set_capability(in, EV_KEY, KEY_WAKEUP);
+	if (input_register_device(in)) {
+		input_free_device(in);
+		return;
+	}
+	cfg->wake_input = in;
+}
+
+static void brcmf_wowl_wake_input_unregister(struct brcmf_cfg80211_info *cfg)
+{
+	if (!cfg->wake_input)
+		return;
+	input_unregister_device(cfg->wake_input);
+	cfg->wake_input = NULL;
+}
+
+static void brcmf_wowl_wake_input_report(struct brcmf_cfg80211_info *cfg)
+{
+	struct input_dev *in = cfg->wake_input;
+
+	if (!in)
+		return;
+	input_report_key(in, KEY_WAKEUP, 1);
+	input_sync(in);
+	input_report_key(in, KEY_WAKEUP, 0);
+	input_sync(in);
+}
+
 static void brcmf_report_wowl_wakeind(struct wiphy *wiphy, struct brcmf_if *ifp)
 {
 	struct brcmf_cfg80211_info *cfg = wiphy_to_cfg(wiphy);
@@ -3749,8 +3794,10 @@ static void brcmf_report_wowl_wakeind(struct wiphy *wiphy, struct brcmf_if *ifp)
 
 	wakeind = le32_to_cpu(wake_ind_le.ucode_wakeind);
 	brcmf_info("wowl wakeind=0x%08x\n", wakeind);
-	if (wakeind & BRCMF_WOWL_NET)
+	if (wakeind & BRCMF_WOWL_NET) {
 		cfg->wowl.wake_count++;
+		brcmf_wowl_wake_input_report(cfg);
+	}
 	if (wakeind & (BRCMF_WOWL_MAGIC | BRCMF_WOWL_DIS | BRCMF_WOWL_BCN |
 		       BRCMF_WOWL_RETR | BRCMF_WOWL_NET |
 		       BRCMF_WOWL_PFN_FOUND)) {
@@ -3804,6 +3851,14 @@ static void brcmf_report_wowl_wakeind(struct wiphy *wiphy, struct brcmf_if *ifp)
 #else
 
 static void brcmf_report_wowl_wakeind(struct wiphy *wiphy, struct brcmf_if *ifp)
+{
+}
+
+static void brcmf_wowl_wake_input_register(struct brcmf_cfg80211_info *cfg)
+{
+}
+
+static void brcmf_wowl_wake_input_unregister(struct brcmf_cfg80211_info *cfg)
 {
 }
 
@@ -7788,6 +7843,7 @@ struct brcmf_cfg80211_info *brcmf_cfg80211_attach(struct brcmf_pub *drvr,
 
 #ifdef CONFIG_PM
 	brcmf_wowl_board_install(cfg);
+	brcmf_wowl_wake_input_register(cfg);
 	brcmf_debugfs_add_entry(drvr, "wowl", brcmf_wowl_debugfs_read);
 #endif
 
@@ -7886,6 +7942,7 @@ void brcmf_cfg80211_detach(struct brcmf_cfg80211_info *cfg)
 		return;
 
 	brcmf_pno_detach(cfg);
+	brcmf_wowl_wake_input_unregister(cfg);
 	brcmf_btcoex_detach(cfg);
 	wiphy_unregister(cfg->wiphy);
 	wl_deinit_priv(cfg);
