@@ -58,6 +58,7 @@ struct brcmf_bus_dcmd {
  * @rxctl: receive a control response message from dongle.
  * @gettxq: obtain a reference of bus transmit queue (optional).
  * @wowl_config: specify if dongle is configured for wowl when going to suspend
+ * @wake_hold: hold off system suspend after a network wake-up (optional).
  * @get_ramsize: obtain size of device memory.
  * @get_memdump: obtain device memory dump in provided buffer.
  * @get_fwname: obtain firmware name.
@@ -75,6 +76,7 @@ struct brcmf_bus_ops {
 	int (*rxctl)(struct device *dev, unsigned char *msg, uint len);
 	struct pktq * (*gettxq)(struct device *dev);
 	void (*wowl_config)(struct device *dev, bool enabled);
+	void (*wake_hold)(struct device *dev);
 	size_t (*get_ramsize)(struct device *dev);
 	int (*get_memdump)(struct device *dev, void *data, size_t len);
 	int (*get_fwname)(struct device *dev, const char *ext,
@@ -200,6 +202,15 @@ void brcmf_bus_wowl_config(struct brcmf_bus *bus, bool enabled)
 {
 	if (bus->ops->wowl_config)
 		bus->ops->wowl_config(bus->dev, enabled);
+}
+
+/* The dongle woke the host because of a network pattern: keep the system up long enough for the exchange that
+ * triggered it to finish (optional, bus specific).
+ */
+static inline void brcmf_bus_wake_hold(struct brcmf_bus *bus)
+{
+	if (bus->ops->wake_hold)
+		bus->ops->wake_hold(bus->dev);
 }
 
 static inline size_t brcmf_bus_get_ramsize(struct brcmf_bus *bus)
