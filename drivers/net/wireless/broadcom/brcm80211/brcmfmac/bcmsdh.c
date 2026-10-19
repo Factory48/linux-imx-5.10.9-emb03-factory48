@@ -1068,15 +1068,6 @@ static int brcmf_ops_sdio_probe(struct sdio_func *func,
 	dev_set_drvdata(&sdiodev->func1->dev, bus_if);
 	sdiodev->dev = &sdiodev->func1->dev;
 
-	/* Started before the first interrupt can fire (the OOB irq is requested from the firmware callback, which runs
-	 * after this probe) and ended only after brcmf_sdiod_remove() has released the irq and stopped the data work.
-	 */
-	sdiodev->rx_ws = wakeup_source_register(sdiodev->dev, "brcmf_rx");
-	if (!sdiodev->rx_ws) {
-		err = -ENOMEM;
-		goto fail;
-	}
-
 	brcmf_sdiod_change_state(sdiodev, BRCMF_SDIOD_DOWN);
 
 	brcmf_dbg(SDIO, "F2 found, calling brcmf_sdiod_probe...\n");
@@ -1090,7 +1081,6 @@ static int brcmf_ops_sdio_probe(struct sdio_func *func,
 	return 0;
 
 fail:
-	wakeup_source_unregister(sdiodev->rx_ws);
 	dev_set_drvdata(&func->dev, NULL);
 	dev_set_drvdata(&sdiodev->func1->dev, NULL);
 	kfree(sdiodev);
@@ -1120,7 +1110,6 @@ static void brcmf_ops_sdio_remove(struct sdio_func *func)
 
 		/* only proceed with rest of cleanup if func 1 */
 		brcmf_sdiod_remove(sdiodev);
-		wakeup_source_unregister(sdiodev->rx_ws);
 
 		dev_set_drvdata(&sdiodev->func1->dev, NULL);
 		dev_set_drvdata(&sdiodev->func2->dev, NULL);

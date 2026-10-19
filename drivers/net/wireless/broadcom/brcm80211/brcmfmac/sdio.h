@@ -162,7 +162,6 @@ struct brcmf_sdreg {
 	int value;
 };
 
-struct wakeup_source;
 struct brcmf_sdio;
 struct brcmf_sdiod_freezer;
 
@@ -188,7 +187,6 @@ struct brcmf_sdio_dev {
 	char fw_name[BRCMF_FW_NAME_LEN];
 	char nvram_name[BRCMF_FW_NAME_LEN];
 	bool wowl_enabled;
-	struct wakeup_source *rx_ws;	/* holds off suspend after an interrupt or rx, see wake_hold_ms */
 	enum brcmf_sdiod_state state;
 	struct brcmf_sdiod_freezer *freezer;
 };
